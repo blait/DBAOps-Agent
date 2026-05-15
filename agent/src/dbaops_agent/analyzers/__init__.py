@@ -1,3 +1,3 @@
-from . import anomaly, log_classify
+from . import anomaly, correlate, log_classify
 
-__all__ = ["anomaly", "log_classify"]
+__all__ = ["anomaly", "correlate", "log_classify"]
