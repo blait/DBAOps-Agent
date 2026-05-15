@@ -53,3 +53,39 @@ output "agentcore_gateway_role_arn" {
 output "prometheus_query_lambda_arn" {
   value = module.lambda_prometheus_query.function_arn
 }
+
+output "mysql_endpoint" {
+  value = module.rds_mysql.endpoint
+}
+
+output "mysql_secret_arn" {
+  value = module.rds_mysql.master_user_secret_arn
+}
+
+output "mysql_resource_id" {
+  value = module.rds_mysql.resource_id
+}
+
+output "msk_cluster_arn" {
+  value = module.msk_serverless.cluster_arn
+}
+
+output "msk_cluster_name" {
+  value = module.msk_serverless.cluster_name
+}
+
+output "msk_bootstrap_brokers" {
+  value = data.aws_msk_bootstrap_brokers.this.bootstrap_brokers_sasl_iam
+}
+
+output "ecs_cluster_name" {
+  value = module.ecs_generators.cluster_name
+}
+
+output "data_gen_repo_url" {
+  value = module.ecs_generators.data_gen_repo_url
+}
+
+output "log_gen_repo_url" {
+  value = module.ecs_generators.log_gen_repo_url
+}
