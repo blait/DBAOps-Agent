@@ -77,11 +77,17 @@ resource "aws_route_table_association" "private" {
 data "aws_ami" "nat" {
   count       = var.enable_nat_instance ? 1 : 0
   most_recent = true
-  owners      = ["amazon"]
+  # fck-nat 공식 publisher (https://fck-nat.dev/)
+  owners      = ["568608671756"]
 
   filter {
     name   = "name"
-    values = ["fck-nat-amzn2-*-arm64-ebs"]
+    values = ["fck-nat-al2023-*-arm64-ebs"]
+  }
+
+  filter {
+    name   = "architecture"
+    values = ["arm64"]
   }
 }
 

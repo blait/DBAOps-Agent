@@ -45,14 +45,28 @@ resource "aws_cognito_user_pool" "this" {
   }
 }
 
+resource "aws_cognito_resource_server" "gateway" {
+  identifier   = "dbaops-gateway"
+  name         = "dbaops-gateway"
+  user_pool_id = aws_cognito_user_pool.this.id
+
+  scope {
+    scope_name        = "invoke"
+    scope_description = "Invoke DBAOps gateway"
+  }
+}
+
 resource "aws_cognito_user_pool_client" "streamlit" {
-  name                                 = "dbaops-${var.environment}-streamlit"
-  user_pool_id                         = aws_cognito_user_pool.this.id
-  generate_secret                      = false
+  name            = "dbaops-${var.environment}-streamlit"
+  user_pool_id    = aws_cognito_user_pool.this.id
+  generate_secret = true
+  # client_credentials flow requires a client secret + custom resource server scope
   allowed_oauth_flows                  = ["client_credentials"]
-  allowed_oauth_scopes                 = ["aws.cognito.signin.user.admin"]
+  allowed_oauth_scopes                 = ["dbaops-gateway/invoke"]
   allowed_oauth_flows_user_pool_client = true
-  explicit_auth_flows                  = ["ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+  explicit_auth_flows                  = ["ALLOW_REFRESH_TOKEN_AUTH"]
+
+  depends_on = [aws_cognito_resource_server.gateway]
 }
 
 ############################################

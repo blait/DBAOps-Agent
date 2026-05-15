@@ -16,7 +16,7 @@ variable "private_subnet_ids" {
 
 variable "engine_version" {
   type    = string
-  default = "15.5"
+  default = "15.17"
 }
 
 variable "instance_class" {

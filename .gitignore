@@ -58,3 +58,7 @@ lambda_package/
 
 # Local-only Claude state (선택)
 .claude/local/
+
+# Terraform plan binaries
+**/tfplan
+**/tfplan.bin
