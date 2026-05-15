@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import os
+
 from dbaops_agent.graph import compile_graph
 
 
-def test_graph_compiles_and_runs():
+def test_graph_compiles_and_runs(monkeypatch):
+    monkeypatch.setenv("DBAOPS_OFFLINE", "1")
+    monkeypatch.setenv("GATEWAY_ENDPOINT", "")  # MCPClient stub 모드
     graph = compile_graph()
     out = graph.invoke(
         {

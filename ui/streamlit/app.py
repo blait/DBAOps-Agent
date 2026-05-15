@@ -7,6 +7,7 @@ import os
 
 import streamlit as st
 
+from agentcore_client import invoke as agentcore_invoke
 from components.report_view import render_report
 from components.request_form import build_request
 
@@ -18,17 +19,22 @@ with st.sidebar:
     st.markdown("### 요청")
     request = build_request()
     submit = st.button("분석 실행", type="primary", use_container_width=True)
+    runtime_arn = os.environ.get("AGENTCORE_RUNTIME_ARN", "")
+    st.caption(f"runtime: {runtime_arn or '(unset)'}")
 
 if submit:
-    runtime_endpoint = os.environ.get("RUNTIME_ENDPOINT", "")
-    if not runtime_endpoint:
-        st.warning("RUNTIME_ENDPOINT 환경변수가 비어 있어요. Phase 1 끝에 채우세요.")
-        st.json(request)
+    if not runtime_arn:
+        st.warning("AGENTCORE_RUNTIME_ARN 이 비어있어요. Phase 1 끝에 채우세요.")
+        st.json({"request": request})
     else:
         with st.spinner("AgentCore Runtime 호출 중..."):
-            # TODO: Phase 1에서 boto3 bedrock-agentcore invoke 호출 구현
-            report = {"markdown": "(placeholder)", "findings": [], "hypotheses": []}
-            render_report(report)
+            result = agentcore_invoke(request)
+        if "error" in result:
+            st.error(result["error"])
+        else:
+            render_report(result.get("report") or {})
+            with st.expander("raw"):
+                st.code(json.dumps(result, ensure_ascii=False, indent=2), language="json")
 
 st.divider()
 st.code(json.dumps(request, indent=2, ensure_ascii=False), language="json")
