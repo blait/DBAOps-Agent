@@ -1,0 +1,19 @@
+{
+  "name": "msk_metrics",
+  "description": "MSK CloudWatch metrics (BytesIn/Out, UnderReplicatedPartitions, ConsumerLag).",
+  "input_schema": {
+    "type": "object",
+    "required": ["cluster_arn", "metric", "start", "end"],
+    "properties": {
+      "cluster_arn": {"type": "string"},
+      "metric":      {"type": "string"},
+      "start":       {"type": "string"},
+      "end":         {"type": "string"},
+      "stat":        {"type": "string", "default": "Average"}
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {"series": {"type": "array"}}
+  }
+}

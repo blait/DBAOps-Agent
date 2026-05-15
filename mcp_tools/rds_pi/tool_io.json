@@ -1,0 +1,20 @@
+{
+  "name": "rds_performance_insights",
+  "description": "RDS Performance Insights top SQL by AAS.",
+  "input_schema": {
+    "type": "object",
+    "required": ["db_id", "start", "end"],
+    "properties": {
+      "db_id":    {"type": "string"},
+      "start":    {"type": "string"},
+      "end":      {"type": "string"},
+      "group_by": {"type": "string", "default": "db.sql_tokenized.statement"}
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "top_sql": {"type": "array"}
+    }
+  }
+}

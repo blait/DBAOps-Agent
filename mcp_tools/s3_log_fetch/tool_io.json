@@ -1,0 +1,22 @@
+{
+  "name": "s3_log_fetch",
+  "description": "Fetch gzipped log lines from S3 with byte-range and regex.",
+  "input_schema": {
+    "type": "object",
+    "required": ["bucket", "key"],
+    "properties": {
+      "bucket":     {"type": "string"},
+      "key":        {"type": "string"},
+      "byte_range": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
+      "regex":      {"type": "string"},
+      "max_lines":  {"type": "integer", "default": 5000}
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "lines":     {"type": "array"},
+      "truncated": {"type": "boolean"}
+    }
+  }
+}
