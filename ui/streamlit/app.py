@@ -1,4 +1,4 @@
-"""DBAOps-Agent Streamlit UI — 분석 요청 + 부하 생성기 + 추론 과정 가시화."""
+"""DBAOps-Agent Streamlit UI — 분석 / 시나리오 트리거 / 분석 뷰 4종."""
 
 from __future__ import annotations
 
@@ -10,14 +10,15 @@ import streamlit as st
 
 import ecs_client
 from agentcore_client import invoke as agentcore_invoke
-from components.report_view import render_report
+from components import view_dashboard, view_story, view_trace, view_triage
 from components.request_form import build_request
 
 st.set_page_config(page_title="DBAOps-Agent", layout="wide")
 st.title("DBAOps-Agent")
 st.caption("LangGraph + AgentCore — OS / DB / Log 분석 + 시나리오 생성기")
 
-# ───────────────────────────── Sidebar: 요청 ─────────────────────────────
+
+# ───────────────────────────── Sidebar ─────────────────────────────
 with st.sidebar:
     st.markdown("### 분석 요청")
     request = build_request()
@@ -25,47 +26,85 @@ with st.sidebar:
     runtime_arn = os.environ.get("AGENTCORE_RUNTIME_ARN", "")
     st.caption(f"runtime: `{runtime_arn.rsplit('/',1)[-1] or '(unset)'}`")
 
-# ───────────────────────────── Main: tabs ─────────────────────────────
-tab_report, tab_gen = st.tabs(["📊 분석 리포트", "🧪 부하/에러 생성기"])
 
-with tab_report:
-    if submit:
-        if not runtime_arn:
-            st.warning("AGENTCORE_RUNTIME_ARN 이 비어있어요.")
-            st.json({"request": request})
-        else:
-            t0 = datetime.now(timezone.utc)
-            with st.spinner("AgentCore Runtime 호출 중..."):
-                result = agentcore_invoke(request)
-            elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
+# ───────────────────────────── 분석 결과 캐시 ─────────────────────────────
+if submit:
+    if not runtime_arn:
+        st.warning("AGENTCORE_RUNTIME_ARN 이 비어있어요.")
+        st.stop()
+    t0 = datetime.now(timezone.utc)
+    with st.spinner("AgentCore Runtime 호출 중..."):
+        result = agentcore_invoke(request)
+    elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
+    st.session_state["last_result"] = result
+    st.session_state["last_elapsed"] = elapsed
+    st.session_state["last_request"] = request
+
+result = st.session_state.get("last_result")
+elapsed = st.session_state.get("last_elapsed")
+
+
+# ───────────────────────────── Tabs ─────────────────────────────
+tab_triage, tab_story, tab_dash, tab_trace, tab_raw, tab_gen = st.tabs(
+    [
+        "🚨 Triage",
+        "📖 Incident Story",
+        "🗂 Domain Dashboard",
+        "🧠 Thought Process",
+        "🧾 Raw",
+        "🧪 Generators",
+    ]
+)
+
+
+def _gate_result(tab):
+    """결과가 없으면 안내 후 None 반환."""
+    if not result:
+        tab.info("좌측에서 **분석 실행** 을 눌러 리포트를 받아오세요.")
+        return None
+    if "error" in result:
+        tab.error(result["error"])
+        return None
+    return result.get("report") or {}
+
+
+# Triage
+with tab_triage:
+    rep = _gate_result(tab_triage)
+    if rep is not None:
+        if elapsed:
             st.caption(f"⏱ {elapsed:.1f}s")
+        view_triage.render(rep)
 
-            if "error" in result:
-                st.error(result["error"])
-            else:
-                report = result.get("report") or {}
-                # Thought process는 reporter가 markdown에 이미 넣어주지만,
-                # 별도 expander 로 노드별 timeline 도 시각화한다.
-                trace_events = report.get("trace") or []
-                if trace_events:
-                    with st.expander(f"🧠 Agent thought process ({len(trace_events)} events)", expanded=True):
-                        for ev in trace_events:
-                            ms = ev.get("duration_ms")
-                            tag = f" `{ms}ms`" if ms is not None else ""
-                            phase = ev.get("phase", "info")
-                            icon = {"enter": "▶", "exit": "■", "warn": "⚠", "error": "✗", "info": "•"}.get(phase, "•")
-                            st.markdown(f"{icon} **{ev.get('node','?')}** — {ev.get('summary','')}{tag}")
-                            detail = ev.get("detail")
-                            if detail:
-                                st.json(detail, expanded=False)
+# Story
+with tab_story:
+    rep = _gate_result(tab_story)
+    if rep is not None:
+        view_story.render(rep)
 
-                render_report(report)
-                with st.expander("raw response"):
-                    st.code(json.dumps(result, ensure_ascii=False, indent=2), language="json")
-    else:
-        st.info("좌측 사이드바에서 요청을 채우고 **분석 실행** 을 누르세요.")
-        st.code(json.dumps(request, indent=2, ensure_ascii=False), language="json")
+# Dashboard
+with tab_dash:
+    rep = _gate_result(tab_dash)
+    if rep is not None:
+        view_dashboard.render(rep)
 
+# Trace
+with tab_trace:
+    rep = _gate_result(tab_trace)
+    if rep is not None:
+        view_trace.render(rep)
+
+# Raw
+with tab_raw:
+    rep = _gate_result(tab_raw)
+    if rep is not None:
+        with st.expander("Markdown", expanded=False):
+            st.markdown(rep.get("markdown", "_(empty)_"))
+        with st.expander("Full JSON response"):
+            st.code(json.dumps(result, ensure_ascii=False, indent=2), language="json")
+
+
+# ───────────────────────────── Generators 탭 ─────────────────────────────
 with tab_gen:
     st.markdown("### 시나리오 트리거")
     st.caption(
