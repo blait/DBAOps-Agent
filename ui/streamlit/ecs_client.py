@@ -176,3 +176,111 @@ def default_subnets() -> list[str]:
 def default_security_groups() -> list[str]:
     csv = os.environ.get("ECS_SECURITY_GROUPS", "")
     return [s.strip() for s in csv.split(",") if s.strip()]
+
+
+# ───────────────────────── 단일 task 진행 추적 ─────────────────────────
+
+
+def describe_task(task_id: str) -> dict[str, Any] | None:
+    """단일 task 상태 + 컨테이너 + 로그 stream 정보."""
+    ecs = _ecs()
+    arn = task_id if task_id.startswith("arn:") else f"arn:aws:ecs:{REGION}:{_account_id()}:task/{CLUSTER}/{task_id}"
+    desc = ecs.describe_tasks(cluster=CLUSTER, tasks=[arn]).get("tasks") or []
+    if not desc:
+        return None
+    t = desc[0]
+    family = (t.get("taskDefinitionArn") or "").rsplit("/", 1)[-1]
+    container = (t.get("containers") or [{}])[0]
+
+    # CW Logs stream 정보 추출 — task definition 의 logConfiguration 에서
+    log_group = log_stream = None
+    try:
+        td = ecs.describe_task_definition(taskDefinition=family).get("taskDefinition") or {}
+        for c in td.get("containerDefinitions") or []:
+            if c.get("name") == container.get("name"):
+                lc = (c.get("logConfiguration") or {}).get("options") or {}
+                log_group = lc.get("awslogs-group")
+                prefix = lc.get("awslogs-stream-prefix")
+                if log_group and prefix and container.get("name"):
+                    # awslogs stream name = "<prefix>/<container_name>/<task_id>"
+                    log_stream = f"{prefix}/{container.get('name')}/{(t.get('taskArn') or '').rsplit('/', 1)[-1]}"
+                break
+    except Exception:  # noqa: BLE001
+        pass
+
+    def _iso(v: Any) -> str | None:
+        if isinstance(v, datetime):
+            return v.astimezone(timezone.utc).isoformat(timespec="seconds")
+        return str(v) if v else None
+
+    return {
+        "task_id":          (t.get("taskArn") or "").rsplit("/", 1)[-1],
+        "family":           family,
+        "last_status":      t.get("lastStatus"),
+        "desired_status":   t.get("desiredStatus"),
+        "stop_code":        t.get("stopCode"),
+        "stopped_reason":   (t.get("stoppedReason") or "") or None,
+        "container_name":   container.get("name"),
+        "container_status": container.get("lastStatus"),
+        "exit_code":        container.get("exitCode"),
+        "exit_reason":      container.get("reason"),
+        "created_at":       _iso(t.get("createdAt")),
+        "started_at":       _iso(t.get("startedAt")),
+        "stopped_at":       _iso(t.get("stoppedAt")),
+        "log_group":        log_group,
+        "log_stream":       log_stream,
+    }
+
+
+_ACCOUNT_ID: str | None = None
+
+
+def _account_id() -> str:
+    global _ACCOUNT_ID
+    if _ACCOUNT_ID is None:
+        _ACCOUNT_ID = boto3.client("sts", region_name=REGION).get_caller_identity().get("Account") or ""
+    return _ACCOUNT_ID
+
+
+def stop_task(task_id: str, reason: str = "stopped from streamlit") -> dict[str, Any]:
+    arn = task_id if task_id.startswith("arn:") else f"arn:aws:ecs:{REGION}:{_account_id()}:task/{CLUSTER}/{task_id}"
+    return _ecs().stop_task(cluster=CLUSTER, task=arn, reason=reason)
+
+
+# ───────────────────────── CloudWatch Logs tail ─────────────────────────
+
+
+def tail_log_events(log_group: str, log_stream: str, *, start_from_head: bool = True,
+                    next_token: str | None = None, limit: int = 200) -> dict[str, Any]:
+    """get_log_events 한 번 호출. 다음 token + events 를 반환.
+
+    nextForwardToken 으로 다음 호출 시 이어서 읽을 수 있다.
+    """
+    cw = boto3.client("logs", region_name=REGION)
+    kwargs: dict[str, Any] = {
+        "logGroupName": log_group,
+        "logStreamName": log_stream,
+        "limit": limit,
+        "startFromHead": start_from_head,
+    }
+    if next_token:
+        kwargs["nextToken"] = next_token
+        kwargs.pop("startFromHead", None)
+    try:
+        resp = cw.get_log_events(**kwargs)
+    except cw.exceptions.ResourceNotFoundException:
+        return {"events": [], "next_token": next_token, "ready": False}
+
+    events = []
+    for e in resp.get("events") or []:
+        ts = e.get("timestamp")
+        events.append({
+            "ts": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat(timespec="seconds")
+                  if isinstance(ts, (int, float)) else None,
+            "message": e.get("message") or "",
+        })
+    return {
+        "events":     events,
+        "next_token": resp.get("nextForwardToken"),
+        "ready":      True,
+    }
