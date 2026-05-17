@@ -6,10 +6,12 @@ import logging
 import uuid
 from typing import Any
 
+import time
+
 from ..analyzers.log_classify import classify, top_n
 from ..state import AnalysisState, Finding
 from ..tools.mcp_client import MCPClient
-from ._common import llm_json, time_range, utc_iso
+from ._common import llm_json, time_range, trace, utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -163,8 +165,29 @@ def _rca(classified: list[dict]) -> list[Finding]:
 
 
 def run(state: AnalysisState) -> AnalysisState:
+    events: list[dict] = [trace("log_subgraph", "enter", phase="enter")]
+
+    t0 = time.time()
     sources = _plan(state)
+    events.append(trace("log.plan", f"sources={len(sources)}",
+                        detail={"names": [s.get("name") for s in sources]},
+                        duration_ms=int((time.time()-t0)*1000)))
+
+    t0 = time.time()
     fetched = _fetch(state, sources)
+    total_lines = sum(len(s.get("lines") or []) for s in fetched)
+    events.append(trace("log.fetch", f"sources={len(fetched)} total_lines={total_lines}",
+                        duration_ms=int((time.time()-t0)*1000)))
+
+    t0 = time.time()
     classified = _classify(fetched)
+    n_templates = sum(len(c.get("templates") or []) for c in classified)
+    events.append(trace("log.classify", f"templates={n_templates}",
+                        duration_ms=int((time.time()-t0)*1000)))
+
+    t0 = time.time()
     findings = _rca(classified)
-    return {"log_findings": findings}
+    events.append(trace("log.rca", f"findings={len(findings)}",
+                        duration_ms=int((time.time()-t0)*1000), phase="exit"))
+
+    return {"log_findings": findings, "trace": events}

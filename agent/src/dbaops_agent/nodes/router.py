@@ -7,8 +7,10 @@
 
 from __future__ import annotations
 
+import time
+
 from ..state import AnalysisState, Route
-from ._common import llm_json
+from ._common import llm_json, trace
 
 _KEYWORD_OS = ("cpu", "memory", "메모리", "disk", "iops", "host", "node", "디스크")
 _KEYWORD_DB = ("query", "쿼리", "lock", "락", "tps", "qps", "kafka", "lag", "cache hit", "deadlock")
@@ -43,10 +45,16 @@ def _keyword_route(text: str) -> Route:
 
 
 def run(state: AnalysisState) -> AnalysisState:
+    t0 = time.time()
     req = state.get("request") or {}
     explicit = req.get("lens")
     if explicit in _VALID:
-        return {"route": explicit}  # type: ignore[return-value]
+        ms = int((time.time() - t0) * 1000)
+        return {
+            "route": explicit,  # type: ignore[typeddict-item]
+            "trace": [trace("router", f"explicit lens={explicit}", phase="exit",
+                            detail={"source": "request.lens"}, duration_ms=ms)],
+        }
 
     free_text = req.get("free_text", "") or ""
     targets = req.get("targets") or []
@@ -54,6 +62,14 @@ def run(state: AnalysisState) -> AnalysisState:
 
     obj = llm_json(_ROUTER_SYSTEM, user_msg, default=None)
     route = (obj or {}).get("route") if isinstance(obj, dict) else None
-    if route in _VALID:
-        return {"route": route}  # type: ignore[return-value]
-    return {"route": _keyword_route(free_text)}  # type: ignore[return-value]
+    source = "llm" if route in _VALID else "keyword_fallback"
+    if route not in _VALID:
+        route = _keyword_route(free_text)
+
+    ms = int((time.time() - t0) * 1000)
+    return {
+        "route": route,  # type: ignore[typeddict-item]
+        "trace": [trace("router", f"route={route}", phase="exit",
+                        detail={"source": source, "free_text": free_text[:120]},
+                        duration_ms=ms)],
+    }

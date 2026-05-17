@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import time
 from typing import Iterable
 
-from ..state import AnalysisReport, AnalysisState, Finding, Hypothesis
+from ..state import AnalysisReport, AnalysisState, Finding, Hypothesis, TraceEvent
+from ._common import trace as mk_trace
 
 _SEVERITY_ORDER = {"error": 0, "warn": 1, "info": 2}
 
@@ -41,6 +43,7 @@ def _render_markdown(report: AnalysisReport) -> str:
     hypotheses = report.get("hypotheses") or []
     next_actions = report.get("next_actions") or []
     request = report.get("request") or {}
+    trace_events: list[TraceEvent] = report.get("trace") or []
 
     lines: list[str] = ["# DBAOps Analysis Report", ""]
     tr = request.get("time_range") or {}
@@ -80,10 +83,19 @@ def _render_markdown(report: AnalysisReport) -> str:
             lines.append(f"- {a}")
         lines.append("")
 
+    if trace_events:
+        lines.append("## Thought Process")
+        for ev in trace_events:
+            ms = ev.get("duration_ms")
+            tag = f" `{ms}ms`" if ms is not None else ""
+            lines.append(f"- **{ev.get('node','?')}** — {ev.get('summary','')}{tag}")
+        lines.append("")
+
     return "\n".join(lines).rstrip() + "\n"
 
 
 def run(state: AnalysisState) -> AnalysisState:
+    t0 = time.time()
     findings = _gather_findings(state)
     hypotheses = state.get("hypotheses") or []
     report: AnalysisReport = {
@@ -91,6 +103,14 @@ def run(state: AnalysisState) -> AnalysisState:
         "findings": findings,
         "hypotheses": hypotheses,
         "next_actions": _next_actions(findings, hypotheses),
+        "trace": list(state.get("trace") or []),
     }
+    # reporter 자신의 trace 도 추가
+    report["trace"].append(mk_trace(
+        "reporter",
+        f"findings={len(findings)} hypotheses={len(hypotheses)} actions={len(report['next_actions'])}",
+        phase="exit",
+        duration_ms=int((time.time() - t0) * 1000),
+    ))
     report["markdown"] = _render_markdown(report)
     return {"report": report}

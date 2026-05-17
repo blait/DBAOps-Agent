@@ -6,10 +6,12 @@ import logging
 import uuid
 from typing import Any
 
+import time
+
 from ..analyzers.correlate import bucketize, cross_source
 from ..state import AnalysisState, Finding
 from ..tools.mcp_client import MCPClient
-from ._common import llm_json, time_range, utc_iso
+from ._common import llm_json, time_range, trace, utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -221,11 +223,35 @@ def _summarize(payload: dict[str, Any]) -> list[Finding]:
 
 
 def run(state: AnalysisState) -> AnalysisState:
+    events: list[dict] = [trace("db_subgraph", "enter", phase="enter")]
+
+    t0 = time.time()
     plan = _plan(state)
+    pg_n = len((plan.get("pg") or {}).get("queries") or [])
+    my_n = len((plan.get("mysql") or {}).get("queries") or [])
+    kf_n = len((plan.get("kafka") or {}).get("metrics") or [])
+    events.append(trace("db.plan", f"pg={pg_n} mysql={my_n} kafka={kf_n}",
+                        duration_ms=int((time.time()-t0)*1000)))
+
+    t0 = time.time()
     pg = _fetch_pg(state, plan.get("pg") or {})
     mysql = _fetch_mysql(state, plan.get("mysql") or {})
     kafka = _fetch_kafka(state, plan.get("kafka") or {})
+    pg_rows = sum(len(r.get("rows") or []) for r in pg)
+    my_rows = sum(len(r.get("rows") or []) for r in mysql)
+    kf_pts = sum(len(r.get("series") or []) for r in kafka)
+    events.append(trace("db.fetch", f"pg_rows={pg_rows} mysql_rows={my_rows} kafka_points={kf_pts}",
+                        duration_ms=int((time.time()-t0)*1000)))
+
+    t0 = time.time()
     correlations = _correlate(pg, mysql, kafka)
+    events.append(trace("db.correlate", f"cross_source_buckets={len(correlations)}",
+                        duration_ms=int((time.time()-t0)*1000)))
+
+    t0 = time.time()
     payload = {"pg": pg, "mysql": mysql, "kafka": kafka, "correlations": correlations}
     findings = _summarize(payload)
-    return {"db_findings": findings}
+    events.append(trace("db.summarize", f"findings={len(findings)}",
+                        duration_ms=int((time.time()-t0)*1000), phase="exit"))
+
+    return {"db_findings": findings, "trace": events}

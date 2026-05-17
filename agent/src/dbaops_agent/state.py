@@ -2,6 +2,7 @@
 
 LangGraph 의 병렬 실행 (multi 라우트) 에서는 같은 키를 여러 노드가 동시에 반환할 수 있다.
 - raw_signals (dict) / tool_budget (int) 는 reducer 로 머지/감산하도록 Annotated 처리.
+- trace (list) 는 노드별 입출력 요약을 누적 (extend reducer).
 - domain 별 findings 는 서로 다른 키라 reducer 없이도 안전.
 """
 
@@ -29,6 +30,24 @@ def _min_int(left: int | None, right: int | None) -> int:
     if right is None:
         return left
     return min(left, right)
+
+
+def _extend_list(left: list | None, right: list | None) -> list:
+    out: list = []
+    if left:
+        out.extend(left)
+    if right:
+        out.extend(right)
+    return out
+
+
+class TraceEvent(TypedDict, total=False):
+    ts: str
+    node: str
+    phase: Literal["enter", "exit", "info", "warn", "error"]
+    summary: str
+    detail: dict[str, Any]
+    duration_ms: int
 
 
 class AnalysisRequest(TypedDict, total=False):
@@ -60,6 +79,7 @@ class AnalysisReport(TypedDict, total=False):
     hypotheses: list[Hypothesis]
     next_actions: list[str]
     markdown: str
+    trace: list[TraceEvent]
 
 
 class AnalysisState(TypedDict, total=False):
@@ -73,3 +93,4 @@ class AnalysisState(TypedDict, total=False):
     report: AnalysisReport | None
     messages: list[BaseMessage]
     tool_budget: Annotated[int, _min_int]
+    trace: Annotated[list[TraceEvent], _extend_list]

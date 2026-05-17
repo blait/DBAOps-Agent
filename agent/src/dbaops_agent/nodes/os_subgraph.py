@@ -7,10 +7,12 @@ import os
 import uuid
 from typing import Any
 
+import time
+
 from ..analyzers.anomaly import detect
 from ..state import AnalysisState, Finding
 from ..tools.mcp_client import MCPClient
-from ._common import llm_json, time_range, utc_iso
+from ._common import llm_json, time_range, trace, utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -206,8 +208,31 @@ def _summarize(summary: list[dict[str, Any]]) -> list[Finding]:
 
 
 def run(state: AnalysisState) -> AnalysisState:
+    events: list[dict] = [trace("os_subgraph", "enter", phase="enter")]
+
+    t0 = time.time()
     prom_qs, cw_qs = _plan(state)
+    events.append(trace("os.plan", f"prom_queries={len(prom_qs)} cw_queries={len(cw_qs)}",
+                        detail={"prom": [q.get("name") for q in prom_qs],
+                                "cw":   [q.get("name") for q in cw_qs]},
+                        duration_ms=int((time.time()-t0)*1000)))
+
+    t0 = time.time()
     series_map = _fetch(state, prom_qs, cw_qs)
+    nonempty = sum(1 for v in series_map.values() if v["series"])
+    events.append(trace("os.fetch", f"series filled={nonempty}/{len(series_map)}",
+                        detail={"by_source": {n: len(v["series"]) for n, v in series_map.items()}},
+                        duration_ms=int((time.time()-t0)*1000)))
+
+    t0 = time.time()
     summary = _anomaly_summary(series_map)
+    n_anom = sum(len(s["anomalies"]) for s in summary)
+    events.append(trace("os.anomaly", f"anomalies={n_anom} across {len(summary)} series",
+                        duration_ms=int((time.time()-t0)*1000)))
+
+    t0 = time.time()
     findings = _summarize(summary)
-    return {"os_findings": findings}
+    events.append(trace("os.summarize", f"findings={len(findings)}",
+                        duration_ms=int((time.time()-t0)*1000), phase="exit"))
+
+    return {"os_findings": findings, "trace": events}

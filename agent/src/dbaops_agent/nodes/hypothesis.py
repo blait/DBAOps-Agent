@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 import uuid
 
+import time
+
 from ..analyzers.correlate import bucketize, cross_source
 from ..state import AnalysisState, Finding, Hypothesis
-from ._common import llm_json, utc_iso
+from ._common import llm_json, trace, utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +47,17 @@ def _co_occurrence(findings: list[Finding]) -> list[dict]:
 
 
 def run(state: AnalysisState) -> AnalysisState:
+    t0 = time.time()
     findings = _gather(state)
     route = state.get("route")
     if route != "multi" and len(findings) < 2:
-        return {"hypotheses": []}
+        return {
+            "hypotheses": [],
+            "trace": [trace("hypothesis",
+                            f"skipped (route={route} findings={len(findings)})",
+                            phase="exit",
+                            duration_ms=int((time.time()-t0)*1000))],
+        }
 
     co = _co_occurrence(findings)
     payload = {
@@ -88,7 +97,13 @@ def run(state: AnalysisState) -> AnalysisState:
         )
     # raw_signals 에 디버그용 보존 (옵션)
     state.setdefault("raw_signals", {})["hypothesis_co"] = co
-    return {"hypotheses": hypotheses}
+    return {
+        "hypotheses": hypotheses,
+        "trace": [trace("hypothesis",
+                        f"hypotheses={len(hypotheses)} co_buckets={len(co)} findings={len(findings)}",
+                        phase="exit",
+                        duration_ms=int((time.time()-t0)*1000))],
+    }
 
 
 # 사용되지 않는 import 정리용
