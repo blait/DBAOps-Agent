@@ -117,22 +117,66 @@ def _render_task_card(task_id: str) -> None:
             st.caption("로그 stream 정보 없음 (task definition logConfiguration 확인).")
 
 
+def _render_trigger_panel() -> None:
+    """시나리오 트리거 버튼 패널 — Generators 탭 안에 배치."""
+    subnets = ecs_client.default_subnets()
+    sgs = ecs_client.default_security_groups()
+    if not subnets:
+        st.warning("ECS_SUBNETS 환경변수 비어있음. 트리거가 비활성화됩니다.")
+
+    st.markdown("#### ▶ 시나리오 트리거")
+    st.caption(
+        "버튼 클릭 시 ECS Fargate Spot 으로 task 1개를 즉시 띄우고, "
+        "아래 라이브 모니터에 자동 등록됩니다."
+    )
+    cols = st.columns(2)
+    for i, sc in enumerate(ecs_client.SCENARIOS):
+        with cols[i % 2]:
+            if st.button(sc["label"], key=f"scn-{sc['key']}",
+                         use_container_width=True, disabled=not subnets):
+                try:
+                    res = ecs_client.trigger_scenario(
+                        sc["key"], subnets=subnets, security_groups=sgs or None
+                    )
+                    if res.get("ok"):
+                        # 자동 추적 등록
+                        tasks = st.session_state.get("tracked_tasks") or []
+                        if res["task_id"] not in tasks:
+                            tasks.append(res["task_id"])
+                            st.session_state["tracked_tasks"] = tasks
+                        st.toast(
+                            f"started {res['family']} · task {res['task_id'][:10]}",
+                            icon="▶",
+                        )
+                        st.rerun()
+                    else:
+                        st.error(f"failed: {res.get('failures')}")
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"RunTask error: {e}")
+
+
 def render(autorefresh_sec: int = 5) -> None:
     """Generators 탭 메인."""
     tracked: list[str] = st.session_state.get("tracked_tasks") or []
 
+    # ── 트리거 패널 (탭 상단) ──
+    _render_trigger_panel()
+
+    st.divider()
+
+    # ── 라이브 모니터 헤더 ──
     head_cols = st.columns([3, 1, 1])
-    head_cols[0].markdown("### 🧪 시나리오 생성기 라이브 모니터")
+    head_cols[0].markdown("#### 📺 라이브 모니터")
     auto = head_cols[1].toggle("자동 새로고침", value=True, key="gen-auto")
     if head_cols[2].button("🔄 새로고침", use_container_width=True):
         st.rerun()
     st.caption(
-        "사이드바에서 시나리오를 트리거하면 task_id 가 여기에 자동 등록됩니다. "
-        "task 가 STOPPED 가 되어도 로그/상태는 남아있고, 카드에서 추적 해제할 수 있습니다."
+        "트리거된 task 는 자동 등록됩니다. STOPPED 가 되어도 로그/상태는 남고, "
+        "카드의 🗑 버튼으로 추적 해제할 수 있습니다."
     )
 
     if not tracked:
-        st.info("추적 중인 task 없음. 사이드바 ▶ 시나리오 트리거 에서 시작하세요.")
+        st.info("추적 중인 task 없음. 위 시나리오 버튼으로 시작하세요.")
 
     # 사용자가 직접 task_id 추적 (수동 외부 trigger 케이스)
     with st.expander("➕ 다른 task_id 직접 추적"):

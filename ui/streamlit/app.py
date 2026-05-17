@@ -69,27 +69,7 @@ with st.sidebar:
     runtime_arn = os.environ.get("AGENTCORE_RUNTIME_ARN", "")
     st.caption(f"runtime: `{runtime_arn.rsplit('/',1)[-1] or '(unset)'}`")
     st.caption(f"session: `{st.session_state['session_id']}`")
-
-    st.divider()
-    with st.expander("🧪 시나리오 트리거", expanded=False):
-        subnets = ecs_client.default_subnets()
-        sgs = ecs_client.default_security_groups()
-        if not subnets:
-            st.warning("ECS_SUBNETS 환경변수 비어있음")
-        for sc in ecs_client.SCENARIOS:
-            if st.button(sc["label"], key=f"scn-{sc['key']}", use_container_width=True, disabled=not subnets):
-                try:
-                    res = ecs_client.trigger_scenario(sc["key"], subnets=subnets, security_groups=sgs or None)
-                    if res.get("ok"):
-                        _track_task(res["task_id"])
-                        st.success(
-                            f"started `{res['family']}`  \n"
-                            f"task `{res['task_id'][:8]}…` — **Generators 탭**에서 진행 상황 확인."
-                        )
-                    else:
-                        st.error(f"failed: {res.get('failures')}")
-                except Exception as e:  # noqa: BLE001
-                    st.error(f"RunTask error: {e}")
+    st.caption("🧪 시나리오 트리거는 **시나리오 라이브 모니터** 탭으로 이동했습니다.")
 
 
 # ───────────────────────── 메시지 히스토리 헬퍼 ─────────────────────────
