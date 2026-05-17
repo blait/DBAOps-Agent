@@ -92,9 +92,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _respond_ndjson_stream(self, request: dict) -> None:
-        from .swarm_graph import iter_swarm
-
+    def _start_ndjson(self) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson")
         self.send_header("Transfer-Encoding", "chunked")
@@ -102,32 +100,34 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("X-Stream", "ndjson")
         self.end_headers()
 
-        def write_chunk(payload: bytes) -> None:
-            self.wfile.write(f"{len(payload):X}\r\n".encode())
-            self.wfile.write(payload)
-            self.wfile.write(b"\r\n")
-            self.wfile.flush()
+    def _write_chunk(self, payload: bytes) -> None:
+        self.wfile.write(f"{len(payload):X}\r\n".encode())
+        self.wfile.write(payload)
+        self.wfile.write(b"\r\n")
+        self.wfile.flush()
 
+    def _end_chunked(self) -> None:
         try:
-            for ev in iter_swarm(
-                request,
-                recursion_limit=int(os.environ.get("SWARM_RECURSION_LIMIT", "30")),
-            ):
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except Exception:
+            pass
+
+    def _stream_iterator(self, gen) -> None:
+        self._start_ndjson()
+        try:
+            for ev in gen:
                 line = (json.dumps(ev, ensure_ascii=False, default=str) + "\n").encode()
-                write_chunk(line)
+                self._write_chunk(line)
         except Exception as e:  # noqa: BLE001
-            logger.exception("swarm stream failed")
+            logger.exception("stream failed")
             err = (json.dumps({"type": "error", "error": str(e)}, ensure_ascii=False) + "\n").encode()
             try:
-                write_chunk(err)
+                self._write_chunk(err)
             except Exception:
                 pass
         finally:
-            try:
-                self.wfile.write(b"0\r\n\r\n")
-                self.wfile.flush()
-            except Exception:
-                pass
+            self._end_chunked()
 
     def do_POST(self):  # noqa: N802
         if self.path not in ("/invocations", "/invoke"):
@@ -142,9 +142,19 @@ class _Handler(BaseHTTPRequestHandler):
                 request.get("stream") is True
                 or "ndjson" in (self.headers.get("Accept") or "").lower()
             )
-            if mode == "swarm" and stream_requested:
-                self._respond_ndjson_stream(request)
+
+            if stream_requested:
+                if mode == "swarm":
+                    from .swarm_graph import iter_swarm
+                    self._stream_iterator(iter_swarm(
+                        request,
+                        recursion_limit=int(os.environ.get("SWARM_RECURSION_LIMIT", "30")),
+                    ))
+                else:
+                    from .graph import iter_fast
+                    self._stream_iterator(iter_fast(request))
                 return
+
             result = handler(event)
             self._respond_json(200, result)
         except Exception as e:
