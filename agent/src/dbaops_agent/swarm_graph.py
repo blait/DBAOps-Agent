@@ -291,9 +291,25 @@ def _format_fast_context(fast: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+_MULTI_LENS_INSTRUCTION = (
+    "\n[중요] lens=multi 입니다 — 단일 도메인 분석으로 끝내지 말고 "
+    "**OS / DB / Log 세 도메인을 모두 거쳐** 교차 상관 분석을 수행하세요. "
+    "1) 자기 도메인부터 시작해 핵심 메트릭 한두 개를 본 뒤 "
+    "2) 다른 도메인 specialist 에게 `transfer_to_*` 도구로 즉시 핸드오프 "
+    "3) 마지막 specialist 가 모든 도메인 결과를 종합해 발견사항 / 가설 / 다음 확인 항목으로 정리. "
+    "한 specialist 가 8턴 이상 같은 도구를 반복 호출하지 마세요."
+)
+
+_SINGLE_LENS_INSTRUCTION = (
+    "\n위 요청에 대해 자기 도메인부터 분석을 시작하고, 필요하면 다른 specialist 에게 핸드오프 하세요. "
+    "최종적으로 모든 specialist 가 충분히 분석했다고 판단되면, 발견사항 / 가설 / 다음 확인 항목을 한국어로 정리해 마무리하세요."
+)
+
+
 def _user_text(request: dict[str, Any]) -> str:
     tr = (request.get("time_range") or {})
     fast = request.get("fast_context") or {}
+    lens = (request.get("lens") or "").lower()
     head = (
         f"분석 요청: {request.get('free_text','(없음)')}\n"
         f"lens: {request.get('lens','?')}\n"
@@ -301,18 +317,17 @@ def _user_text(request: dict[str, Any]) -> str:
         f"targets: {request.get('targets') or '—'}"
     )
     fast_block = _format_fast_context(fast)
+    multi = lens == "multi"
     if fast_block:
         instruction = (
             "\n위 1차 분석을 출발점으로 깊이 있는 follow-up 만 수행하세요. "
             "특정 가설의 RCA 검증, 실행계획 검토, 로그 burst 시점 정밀 분석 등이 좋습니다. "
             "최종적으로 발견사항 / 가설 / 다음 확인 항목을 한국어로 정리해 마무리하세요."
         )
+        if multi:
+            instruction += _MULTI_LENS_INSTRUCTION
         return f"{head}\n\n{fast_block}\n{instruction}"
-    return (
-        f"{head}\n"
-        f"\n위 요청에 대해 자기 도메인부터 분석을 시작하고, 필요하면 다른 specialist 에게 핸드오프 하세요. "
-        f"최종적으로 모든 specialist 가 충분히 분석했다고 판단되면, 발견사항 / 가설 / 다음 확인 항목을 한국어로 정리해 마무리하세요."
-    )
+    return f"{head}\n{_MULTI_LENS_INSTRUCTION if multi else _SINGLE_LENS_INSTRUCTION}"
 
 
 def iter_swarm(request: dict[str, Any], *,
