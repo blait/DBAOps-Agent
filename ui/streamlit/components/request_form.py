@@ -11,17 +11,21 @@ def build_request() -> dict:
 
     mode = st.radio(
         "분석 모드",
-        options=["fast", "swarm"],
+        options=["fast", "swarm", "hybrid"],
         format_func=lambda v: {
-            "fast":  "⚡ Fast (정해진 그래프)",
-            "swarm": "🐝 Swarm (specialist 자율 핸드오프, 느리지만 깊음)",
+            "fast":   "⚡ Fast (정해진 그래프, 30s)",
+            "swarm":  "🐝 Swarm (specialist 자율, 60~180s)",
+            "hybrid": "🔬 Hybrid (Fast → Swarm Deep dive)",
         }[v],
         index=0,
         horizontal=True,
-        help="fast 는 router→OS/DB/Log subgraph→hypothesis→reporter 정해진 흐름. "
-             "swarm 은 3 specialist 가 ReAct 루프로 자율 핸드오프하며 follow-up 도구 호출.",
+        help=(
+            "Fast: router→OS/DB/Log subgraph→hypothesis→reporter 정해진 흐름. 30s 안팎.\n"
+            "Swarm: 4 specialist (OS/DB/Log/Query) ReAct + 자율 핸드오프.\n"
+            "Hybrid: 먼저 Fast 로 1차 분석 → 그 결과를 Swarm 에 컨텍스트로 주입해 follow-up."
+        ),
     )
-    lens = st.selectbox("분석 lens", ["multi", "os", "db", "log"], index=0)
+    lens = st.selectbox("분석 lens", ["multi", "os", "db", "log", "query"], index=0)
     start = st.text_input("Start (UTC ISO)", default_start.isoformat(timespec="seconds"))
     end = st.text_input("End (UTC ISO)", now.isoformat(timespec="seconds"))
     targets = st.text_input("대상 (콤마 구분)", "ec2-prometheus")

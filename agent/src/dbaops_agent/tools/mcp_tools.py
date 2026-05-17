@@ -79,18 +79,55 @@ def cloudwatch_metric(namespace: str, metric: str, dimensions: dict[str, str],
 
 @tool
 def sql_readonly(engine: str, db_id: str, sql: str) -> str:
-    """PostgreSQL 또는 MySQL 에 SELECT 쿼리를 실행한다 (sqlglot AST gate, statement_timeout 5s).
+    """PostgreSQL 또는 MySQL 에 SELECT/SHOW/DESCRIBE/EXPLAIN 쿼리를 실행한다.
+
+    sqlglot AST gate 로 INSERT/UPDATE/DELETE/MERGE/DDL 등은 거부됩니다. statement_timeout 5s.
 
     Args:
         engine: "postgres" 또는 "mysql"
         db_id:  RDS 인스턴스/클러스터 식별자 (예 "dbaops-poc-aurora-pg", "dbaops-poc-mysql")
-        sql:    SELECT 만 허용 (INSERT/UPDATE/DELETE 거부됨). pg_stat_*, performance_schema 등 시스템 카탈로그 권장.
+        sql:    SELECT / SHOW / DESCRIBE / EXPLAIN [ANALYZE|...] SELECT...
     """
     r = _get_client().call("sql-readonly___sql_readonly",
                            {"engine": engine, "db_id": db_id, "sql": sql})
     rows = (r or {}).get("rows") or []
     cols = (r or {}).get("columns") or []
     return _truncate({"row_count": len(rows), "columns": cols, "rows": rows[:50]})
+
+
+@tool
+def explain_query(engine: str, db_id: str, sql: str, analyze: bool = False) -> str:
+    """SQL 의 실행계획을 가져온다 (EXPLAIN [ANALYZE]).
+
+    PG:    EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) <SELECT> 또는 EXPLAIN <SELECT>.
+    MySQL: EXPLAIN ANALYZE <SELECT> (8.0.18+) 또는 EXPLAIN FORMAT=TREE <SELECT>.
+
+    Args:
+        engine:  "postgres" 또는 "mysql"
+        db_id:   RDS 인스턴스/클러스터 식별자
+        sql:     실행계획을 보고 싶은 SELECT. EXPLAIN 접두는 자동.
+        analyze: True 면 ANALYZE — 실제로 실행하므로 무거운 쿼리에는 주의.
+    """
+    base = sql.strip().rstrip(";")
+    upper = base.upper().lstrip()
+    if upper.startswith("EXPLAIN"):
+        wrapped = base
+    elif engine == "postgres":
+        wrapped = f"EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) {base}" if analyze else f"EXPLAIN {base}"
+    else:
+        wrapped = f"EXPLAIN ANALYZE {base}" if analyze else f"EXPLAIN FORMAT=TREE {base}"
+
+    r = _get_client().call("sql-readonly___sql_readonly",
+                           {"engine": engine, "db_id": db_id, "sql": wrapped})
+    rows = (r or {}).get("rows") or []
+    cols = (r or {}).get("columns") or []
+    err = (r or {}).get("error")
+    if err:
+        return _truncate({"error": err, "validated_sql": (r or {}).get("validated_sql")})
+    if cols and rows and len(cols) == 1:
+        plan_text = "\n".join(str(row[0]) for row in rows)
+        return _truncate({"plan": plan_text, "row_count": len(rows)}, max_chars=12000)
+    return _truncate({"row_count": len(rows), "columns": cols, "rows": rows[:200]}, max_chars=12000)
 
 
 @tool
@@ -154,6 +191,7 @@ def s3_log_fetch(bucket: str, key: str, regex: str | None = None,
 OS_TOOLS = [prometheus_query, cloudwatch_metric]
 DB_TOOLS = [sql_readonly, rds_performance_insights, msk_metric, cloudwatch_metric]
 LOG_TOOLS = [s3_log_fetch]
+QUERY_TOOLS = [explain_query, sql_readonly]
 
 
 def infra_context() -> dict[str, str]:

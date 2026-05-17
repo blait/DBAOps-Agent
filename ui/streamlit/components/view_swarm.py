@@ -9,9 +9,10 @@ import streamlit as st
 
 
 _AGENT_AVATAR = {
-    "os_specialist":  "🖥️",
-    "db_specialist":  "🗄️",
-    "log_specialist": "📜",
+    "os_specialist":    "🖥️",
+    "db_specialist":    "🗄️",
+    "log_specialist":   "📜",
+    "query_specialist": "🔎",
 }
 
 _ROLE_AVATAR = {
@@ -209,6 +210,19 @@ def render_stream(events: Iterator[dict], request: dict | None = None) -> dict:
                     final_active.split("_")[0] if "_" in final_active else final_active,
                 )
             status_box.success(f"✅ 완료 · 메시지 {n_messages}건 · 핸드오프 {max(0, len(handoffs) - 1)}회")
+
+            # 최종 정리 카드 — 마지막 ai 메시지가 길고 도구 호출이 없으면 그게 정리
+            last_ai = next(
+                (m for m in reversed(messages)
+                 if m.get("role") == "ai" and not m.get("tool_calls") and (m.get("text") or "").strip()),
+                None,
+            )
+            if last_ai and last_ai.get("text"):
+                with log_box:
+                    with st.container(border=True):
+                        st.markdown("### 📤 최종 정리")
+                        st.caption(f"by {_agent_chip(last_ai.get('name'))}")
+                        st.markdown(last_ai["text"])
 
     return {
         "messages": messages,

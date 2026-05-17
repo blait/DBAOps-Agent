@@ -29,15 +29,45 @@ with st.sidebar:
 
 
 # ───────────────────────────── 분석 호출 ─────────────────────────────
+
+
+def _fast_context_from_report(report: dict) -> dict:
+    """fast report 에서 swarm 에 넘길 가벼운 dict 만 추출."""
+    if not isinstance(report, dict):
+        return {}
+    return {
+        "findings":     report.get("findings") or [],
+        "hypotheses":   report.get("hypotheses") or [],
+        "next_actions": report.get("next_actions") or [],
+    }
+
+
 if submit:
     if not runtime_arn:
         st.warning("AGENTCORE_RUNTIME_ARN 이 비어있어요.")
         st.stop()
     st.session_state["last_request"] = request
-    if (request.get("mode") or "fast").lower() == "swarm":
-        # streaming — 결과는 Swarm 탭이 직접 받아 렌더
+    mode = (request.get("mode") or "fast").lower()
+
+    if mode == "swarm":
         st.session_state["last_result"] = {"swarm_stream_pending": True}
         st.session_state["last_elapsed"] = None
+    elif mode == "hybrid":
+        # 1단계 — fast 분석 즉시 호출
+        t0 = datetime.now(timezone.utc)
+        fast_req = {**request, "mode": "fast"}
+        with st.spinner("1차 Fast 분석 호출 중..."):
+            fast_result = agentcore_invoke(fast_req)
+        elapsed_fast = (datetime.now(timezone.utc) - t0).total_seconds()
+        # 2단계 — swarm 은 Swarm 탭이 streaming 으로 받음, fast_context 동봉
+        fast_ctx = _fast_context_from_report((fast_result or {}).get("report") or {})
+        st.session_state["last_result"] = {
+            "report": (fast_result or {}).get("report"),
+            "swarm_stream_pending": True,
+            "fast_context": fast_ctx,
+            "fast_elapsed": elapsed_fast,
+        }
+        st.session_state["last_elapsed"] = elapsed_fast
     else:
         t0 = datetime.now(timezone.utc)
         with st.spinner("AgentCore Runtime 호출 중..."):
@@ -82,22 +112,63 @@ def _gate_report(tab):
 with tab_swarm:
     req_cached = st.session_state.get("last_request") or {}
     if not result:
-        st.info("swarm 모드로 분석 실행하면 여기에 specialist 대화가 실시간 표시됩니다.")
+        st.info("swarm/hybrid 모드로 분석 실행하면 여기에 specialist 대화가 실시간 표시됩니다.")
     elif result.get("swarm_stream_pending"):
+        # hybrid 라면 fast_context 가 함께 들어있다 → swarm 요청에 포함
+        fast_ctx = result.get("fast_context") or {}
+        if fast_ctx:
+            st.success(
+                f"1차 Fast 분석 완료 ({result.get('fast_elapsed', 0):.1f}s) — "
+                f"finding {len(fast_ctx.get('findings') or [])}건, "
+                f"hypothesis {len(fast_ctx.get('hypotheses') or [])}건. "
+                f"이제 Swarm 이 follow-up 을 시작합니다."
+            )
+            with st.expander("📋 Fast 분석 요약 (swarm 컨텍스트)"):
+                if fast_ctx.get("findings"):
+                    st.markdown("**findings**")
+                    for f in fast_ctx["findings"][:30]:
+                        sev = (f.get("severity") or "info").upper()
+                        st.markdown(f"- `[{sev}]` `{f.get('domain','?')}` · {f.get('title','')}")
+                if fast_ctx.get("hypotheses"):
+                    st.markdown("**hypotheses**")
+                    for h in fast_ctx["hypotheses"][:10]:
+                        c = h.get("confidence", 0.0) or 0.0
+                        st.markdown(f"- conf {c:.2f} — {h.get('statement','')}")
+        swarm_req = {**req_cached, "mode": "swarm"}
+        if fast_ctx:
+            swarm_req["fast_context"] = fast_ctx
         t0 = datetime.now(timezone.utc)
-        events = agentcore_invoke_stream(req_cached)
-        final = view_swarm.render_stream(events, request=req_cached)
-        st.session_state["last_result"] = {"swarm": final, "request": req_cached}
-        st.session_state["last_elapsed"] = (datetime.now(timezone.utc) - t0).total_seconds()
-        st.caption(f"⏱ {st.session_state['last_elapsed']:.1f}s")
+        events = agentcore_invoke_stream(swarm_req)
+        final = view_swarm.render_stream(events, request=swarm_req)
+        elapsed_swarm = (datetime.now(timezone.utc) - t0).total_seconds()
+        st.session_state["last_result"] = {
+            "swarm": final,
+            "request": req_cached,
+            "report": result.get("report"),
+            "fast_elapsed": result.get("fast_elapsed"),
+            "swarm_elapsed": elapsed_swarm,
+            "fast_context": fast_ctx,
+        }
+        st.caption(f"⏱ swarm {elapsed_swarm:.1f}s")
     elif "swarm" in result:
-        if elapsed:
-            st.caption(f"⏱ {elapsed:.1f}s")
+        e = result.get("swarm_elapsed") or elapsed
+        if e:
+            st.caption(f"⏱ swarm {e:.1f}s")
         view_swarm.render(result["swarm"], request=req_cached)
     elif "error" in result:
         st.error(result["error"])
     else:
-        st.info("이번 응답은 fast 모드입니다. 사이드바에서 `swarm` 으로 바꿔 실행해 보세요.")
+        # fast 만 받은 상태 — Deep dive 버튼 제공
+        st.info("이번 응답은 fast 모드입니다.")
+        if st.button("🔬 Swarm 으로 Deep dive", type="primary", use_container_width=True):
+            fast_ctx = _fast_context_from_report(result.get("report") or {})
+            st.session_state["last_result"] = {
+                "report": result.get("report"),
+                "swarm_stream_pending": True,
+                "fast_context": fast_ctx,
+                "fast_elapsed": elapsed,
+            }
+            st.rerun()
 
 # Triage
 with tab_triage:

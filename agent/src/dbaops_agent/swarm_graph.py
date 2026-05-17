@@ -24,6 +24,7 @@ from .tools.mcp_tools import (
     DB_TOOLS,
     LOG_TOOLS,
     OS_TOOLS,
+    QUERY_TOOLS,
     infra_context,
 )
 
@@ -86,6 +87,8 @@ def build_swarm():
              "OS 메트릭에서 DB 영향(연결 수 · IOPS · TPS 등)이 의심되어 DB 내부 확인이 필요할 때 넘기세요."),
             ("log_specialist",
              "OS/HW 이상이 OS 또는 application 로그로 설명될 가능성이 있을 때 넘기세요."),
+            ("query_specialist",
+             "특정 쿼리의 실행계획·인덱스 검증이 필요해 보이면 넘기세요."),
         ],
     )
 
@@ -101,6 +104,9 @@ def build_swarm():
              "DB 부하의 원인이 호스트/스토리지/네트워크 측에 있다고 의심되면 넘기세요."),
             ("log_specialist",
              "DB 에러 패턴 또는 application 로그 확인이 필요하면 넘기세요."),
+            ("query_specialist",
+             "느린 쿼리·핫스팟이 식별되어 EXPLAIN ANALYZE 와 인덱스 권고가 필요할 때 넘기세요. "
+             "쿼리 텍스트와 대상 db_id 를 메시지에 명시하세요."),
         ],
     )
 
@@ -116,14 +122,42 @@ def build_swarm():
              "로그에서 호스트/네트워크 단서가 보이면 넘기세요."),
             ("db_specialist",
              "로그에서 DB 내부 검증 (락 / slow query / connection) 이 필요하면 넘기세요."),
+            ("query_specialist",
+             "slow query 로그에서 특정 SQL 의 실행계획이 필요하면 넘기세요."),
+        ],
+    )
+
+    query_specialist = _build_agent(
+        name="query_specialist",
+        role=(
+            "쿼리·실행계획 전문가. EXPLAIN [ANALYZE] 결과를 보고 비효율 지점(풀스캔/Nested Loop·"
+            "Sort·Hash·임시 테이블 등)을 식별하고, 인덱스 추천·SQL 리라이팅·힌트를 제안합니다. "
+            "필요시 sql_readonly 로 `pg_indexes` / `INFORMATION_SCHEMA.STATISTICS` 등 메타도 조회합니다. "
+            "쿼리 자체가 명시되지 않았으면 db_specialist 에게 다시 넘기세요."
+        ),
+        tools=QUERY_TOOLS,
+        peers=[
+            ("db_specialist",
+             "EXPLAIN 만으로 부족하고 pg_stat_* / performance_schema 로 검증이 더 필요할 때 넘기세요."),
+            ("log_specialist",
+             "쿼리가 실제로 slow log 에 어떤 빈도로 찍혔는지 확인이 필요하면 넘기세요."),
         ],
     )
 
     swarm = create_swarm(
-        agents=[os_specialist, db_specialist, log_specialist],
+        agents=[os_specialist, db_specialist, log_specialist, query_specialist],
         default_active_agent=os.environ.get("DBAOPS_SWARM_ENTRY", "os_specialist"),
     ).compile(checkpointer=InMemorySaver())
     return swarm
+
+
+# 이름 → 특화 lens 매핑 — request.lens 또는 request.swarm_entry 로 진입 specialist 결정.
+_LENS_TO_AGENT = {
+    "os":    "os_specialist",
+    "db":    "db_specialist",
+    "log":   "log_specialist",
+    "query": "query_specialist",
+}
 
 
 # ───────────────────────── 메시지 정규화 ─────────────────────────
@@ -221,13 +255,61 @@ def _get_swarm():
     return _SWARM
 
 
+def _format_fast_context(fast: dict[str, Any]) -> str:
+    """fast 모드(정해진 그래프) 결과를 swarm specialist 들이 읽기 좋은 한국어 요약으로 변환."""
+    if not fast:
+        return ""
+
+    lines: list[str] = ["[1차 fast 분석 결과 — 이미 확보된 정보]"]
+    findings = fast.get("findings") or []
+    hypotheses = fast.get("hypotheses") or []
+    next_actions = fast.get("next_actions") or []
+
+    if findings:
+        lines.append(f"\n## findings ({len(findings)}건)")
+        for f in findings[:30]:
+            sev = (f.get("severity") or "info").upper()
+            domain = f.get("domain") or "?"
+            fid = f.get("id") or "?"
+            title = f.get("title") or ""
+            lines.append(f"- [{sev}][{domain}] ({fid}) {title}")
+    if hypotheses:
+        lines.append(f"\n## hypotheses ({len(hypotheses)}건)")
+        for h in hypotheses[:10]:
+            conf = h.get("confidence", 0.0) or 0.0
+            refs = ", ".join(h.get("supporting_finding_ids") or [])
+            lines.append(f"- (conf {conf:.2f}, refs={refs}) {h.get('statement','')}")
+    if next_actions:
+        lines.append(f"\n## next_actions")
+        for a in next_actions[:10]:
+            lines.append(f"- {a}")
+
+    lines.append(
+        "\n[중요] 위 정보는 이미 확보되었습니다. 같은 결과를 다시 얻으려고 같은 도구를 같은 인자로 호출하지 마세요. "
+        "위 finding 중 가장 중요한 가설을 검증/심화하거나, 위에서 다루지 않은 follow-up 질문에 집중하세요."
+    )
+    return "\n".join(lines)
+
+
 def _user_text(request: dict[str, Any]) -> str:
     tr = (request.get("time_range") or {})
-    return (
+    fast = request.get("fast_context") or {}
+    head = (
         f"분석 요청: {request.get('free_text','(없음)')}\n"
         f"lens: {request.get('lens','?')}\n"
         f"time_range: {tr.get('start','?')} → {tr.get('end','?')}\n"
-        f"targets: {request.get('targets') or '—'}\n"
+        f"targets: {request.get('targets') or '—'}"
+    )
+    fast_block = _format_fast_context(fast)
+    if fast_block:
+        instruction = (
+            "\n위 1차 분석을 출발점으로 깊이 있는 follow-up 만 수행하세요. "
+            "특정 가설의 RCA 검증, 실행계획 검토, 로그 burst 시점 정밀 분석 등이 좋습니다. "
+            "최종적으로 발견사항 / 가설 / 다음 확인 항목을 한국어로 정리해 마무리하세요."
+        )
+        return f"{head}\n\n{fast_block}\n{instruction}"
+    return (
+        f"{head}\n"
         f"\n위 요청에 대해 자기 도메인부터 분석을 시작하고, 필요하면 다른 specialist 에게 핸드오프 하세요. "
         f"최종적으로 모든 specialist 가 충분히 분석했다고 판단되면, 발견사항 / 가설 / 다음 확인 항목을 한국어로 정리해 마무리하세요."
     )
@@ -251,10 +333,17 @@ def iter_swarm(request: dict[str, Any], *,
 
     yield {"type": "start"}
 
-    config = {
+    # 진입 specialist 결정 — request.swarm_entry > request.lens > 기본값
+    entry = request.get("swarm_entry")
+    if not entry:
+        entry = _LENS_TO_AGENT.get((request.get("lens") or "").lower())
+    config: dict[str, Any] = {
         "configurable": {"thread_id": request.get("session_id") or "default"},
         "recursion_limit": recursion_limit,
     }
+    initial_state: dict[str, Any] = {"messages": [HumanMessage(content=_user_text(request))]}
+    if entry:
+        initial_state["active_agent"] = entry
     handoffs: list[str] = []
     seen_ids: set[str] = set()
     last_active: list[str] = []
@@ -262,7 +351,7 @@ def iter_swarm(request: dict[str, Any], *,
 
     try:
         for chunk in _get_swarm().stream(
-            {"messages": [HumanMessage(content=_user_text(request))]},
+            initial_state,
             config=config,
             stream_mode="values",
         ):
