@@ -42,14 +42,20 @@ _SUMMARY_SYSTEM = """\
 당신은 호스트/인프라 메트릭 이상치 결과를 사람에게 보고하는 분석가입니다.
 입력은 anomaly summary (각 항목은 name, source ("prom"|"cw"), n_points, anomalies(ts/value/z/reason)).
 
-먼저 reasoning 을 한국어 2~3 문장으로 작성:
-"수치를 본 결과 X 시점에 Y 메트릭이 z=N.NN 으로 튀었고 ... 이는 ... 로 해석한다" 식으로
-구체적 수치와 시점을 인용하면서 finding 으로 결론짓는 추론 흐름을 보여 주세요.
+[reasoning 작성 규칙]
+한국어 2~3 문장. **구체적 수치 + 시점 + 도구**를 반드시 인용:
+좋은 예) "CloudWatch (AWS/RDS) DatabaseConnections 가 2026-05-17T18:04 에 100 (z=4.1) 로 튀어
+        평소 1 대비 비정상 — connection burst 가 의심된다."
+나쁜 예) "CPU 가 튀었다." (수치/시점/출처 없음)
 
-그 다음 finding 배열을 출력:
-- title: 사람이 읽는 짧은 제목
-- severity: "info" | "warn" | "error"
-- evidence: 입력 anomalies 의 핵심 원소 일부 + 짧은 근거 텍스트
+[finding 작성 규칙]
+- title 자체에 핵심 수치를 포함 — 예: "AWS/RDS DatabaseConnections 100 스파이크 (18:04, z=4.1)"
+- evidence 의 **첫 항목은 반드시** 다음 형태의 dict:
+    {"tool": "prometheus_query" 또는 "cloudwatch_metric",
+     "metric": "<PromQL 또는 namespace/MetricName>",
+     "ts": "<RFC3339>", "value": <float>, "z": <float>, "reason": "<탐지근거>"}
+- evidence 의 두 번째 이후엔 입력 anomalies 의 raw 항목들을 그대로 첨부 가능.
+- severity: anomalies 의 |z| 값 / 메트릭 의미를 반영 (z>3 또는 핵심 메트릭이면 warn 이상)
 
 출력은 JSON 한 객체만:
 {"reasoning": "...", "findings": [{"title":..., "severity":..., "evidence":[...]}, ...]}

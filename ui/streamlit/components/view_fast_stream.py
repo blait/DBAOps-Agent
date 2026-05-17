@@ -2,9 +2,55 @@
 
 from __future__ import annotations
 
-from typing import Iterator
+from typing import Any, Iterator
 
 import streamlit as st
+
+
+def _evidence_chip(ev: Any) -> str | None:
+    """evidence 한 항목을 한 줄 chip 으로 변환 — 도구 + 메트릭 + 수치 + 시점 노출."""
+    if isinstance(ev, dict):
+        # OS / DB / log summary 들이 첫 항목으로 넣는 표준 dict
+        tool = ev.get("tool")
+        metric = ev.get("metric") or ev.get("query_or_metric") or ev.get("template")
+        ts = ev.get("ts")
+        value = ev.get("value")
+        z = ev.get("z")
+        n_rows = ev.get("n_rows")
+        count = ev.get("count")
+        ratio = ev.get("ratio_or_total")
+        summary = ev.get("summary")
+        source = ev.get("source")
+
+        bits: list[str] = []
+        if tool:
+            bits.append(f"🛠 `{tool}`")
+        if source:
+            bits.append(f"src=`{source}`")
+        if metric:
+            bits.append(f"metric=`{str(metric)[:60]}`")
+        if value is not None:
+            bits.append(f"value=`{value}`")
+        if z is not None:
+            bits.append(f"z=`{z}`")
+        if n_rows is not None:
+            bits.append(f"rows=`{n_rows}`")
+        if count is not None:
+            bits.append(f"count=`{count}`")
+        if ratio:
+            bits.append(f"ratio=`{ratio}`")
+        if ts:
+            bits.append(f"@`{str(ts)[:19]}`")
+        if summary:
+            bits.append(f"— {summary}")
+
+        if not bits:
+            return None
+        return " · ".join(bits)
+    if isinstance(ev, str):
+        s = ev.strip()
+        return s[:200] if s else None
+    return None
 
 
 _NODE_LABEL = {
@@ -65,6 +111,19 @@ def render_stream(events: Iterator[dict]) -> dict:
                 sev = (f.get("severity") or "info").upper()
                 badge = {"ERROR": "🟥", "WARN": "🟧", "INFO": "🟦"}.get(sev, "•")
                 st.markdown(f"- {badge} `[{sev}]` `{f.get('domain','?')}` · {f.get('title','')}")
+                # 도구·수치 chip — evidence 첫 1~2 항목을 그대로 노출
+                ev_list = f.get("evidence") or []
+                shown = 0
+                for ev in ev_list[:2]:
+                    chip = _evidence_chip(ev)
+                    if chip:
+                        st.caption("　└ " + chip)
+                        shown += 1
+                if not shown and ev_list:
+                    # evidence 가 비표준 형태면 raw 첫 항목을 그대로
+                    raw = ev_list[0]
+                    if isinstance(raw, (dict, list)):
+                        st.caption("　└ " + str(raw)[:200])
             if len(findings) > 10:
                 st.caption(f"...외 {len(findings)-10}건")
             if hypotheses:

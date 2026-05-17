@@ -36,11 +36,26 @@ _PLAN_SYSTEM = """\
 
 _SUMMARY_SYSTEM = """\
 당신은 DB 성능 분석가입니다. 입력은 PG/MySQL/Kafka 도구 호출 결과와 cross-source correlation 입니다.
-실제 row/series 수치를 인용하면서, 발견된 비정상 패턴 → 가설로 이어지는 추론 흐름을 드러냅니다.
+
+[reasoning 작성 규칙]
+2~4 문장. **출처 도구명 + 구체적 row/value + 시점**을 반드시 인용:
+좋은 예) "sql_readonly(postgres, pg.active_sessions) 결과 8 세션이 wait_event=Lock/tuple 로
+        대기 (PID 8729~8731). 동일 시점 msk_metric (MaxOffsetLag) 73k → connection 측 적체 의심."
+나쁜 예) "락 경합이 보였다." (도구/수치 없음)
+
+[finding 작성 규칙]
+- title 에 도구·수치 명시 — 예: "pg_stat_activity: 8 세션 Lock/tuple wait (active_sessions)"
+- evidence 첫 항목은 반드시 다음 dict:
+    {"tool": "sql_readonly"|"rds_performance_insights"|"msk_metric"|"cloudwatch_metric",
+     "query_or_metric": "<쿼리명/메트릭명>",
+     "n_rows": int 또는 "value": <float>,
+     "ts": "<RFC3339>",
+     "summary": "한 줄 요약 (예: 8 세션이 Lock/tuple wait_event)"}
+- evidence 의 두 번째 이후엔 핵심 row/value sample 첨부 가능 (5건 이내).
 
 출력은 JSON 한 객체:
 {
-  "reasoning": "PG active_sessions 에서 hot row 락이 보였고, 동일 시점 Kafka lag 가 같이 튀었으니 ... — 2~4 문장",
+  "reasoning": "...",
   "findings": [{"title": str, "severity": "info"|"warn"|"error", "evidence": [...]}, ...]
 }
 JSON 외 금지.

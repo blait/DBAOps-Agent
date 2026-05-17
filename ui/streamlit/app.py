@@ -11,6 +11,7 @@ import streamlit as st
 import ecs_client
 from agentcore_client import invoke_stream as agentcore_invoke_stream
 from components import view_fast_stream, view_generators, view_swarm
+from components.view_fast_stream import _evidence_chip
 
 st.set_page_config(page_title="DBAOps-Agent", layout="wide")
 st.title("DBAOps-Agent")
@@ -144,6 +145,10 @@ with tab_chat:
                         sev = (f.get("severity") or "info").upper()
                         badge = {"ERROR": "🟥", "WARN": "🟧", "INFO": "🟦"}.get(sev, "•")
                         st.markdown(f"- {badge} `[{sev}]` `{f.get('domain','?')}` · {f.get('title','')}")
+                        for ev in (f.get("evidence") or [])[:2]:
+                            chip = _evidence_chip(ev)
+                            if chip:
+                                st.caption("　└ " + chip)
                     hyps = rep.get("hypotheses") or []
                     if hyps:
                         st.markdown("**가설**")

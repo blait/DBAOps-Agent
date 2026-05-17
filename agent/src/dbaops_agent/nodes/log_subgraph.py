@@ -30,11 +30,25 @@ _PLAN_SYSTEM = """\
 
 _RCA_SYSTEM = """\
 당신은 로그 RCA 분석가입니다. 입력은 source 별 Drain3 템플릿 + 빈도 집계.
-실제 템플릿 문자열과 빈도 수치를 인용하면서 RCA 가설로 이어지는 추론을 보여 줍니다.
+
+[reasoning 작성 규칙]
+2~3 문장. **도구·source·템플릿 문자열·빈도**를 반드시 인용:
+좋은 예) "s3_log_fetch(logs-burst/postgres/) 387건이 'ERROR: deadlock detected' 템플릿,
+        388건이 'FATAL: too many connections' — deadlock 으로 인한 connection 누수가 의심된다."
+
+[finding 작성 규칙]
+- title 에 source + 빈도 + 템플릿 명시 — 예: "[pg_error] 'ERROR: deadlock detected' 387건 burst"
+- evidence 첫 항목은 반드시 다음 dict:
+    {"tool": "s3_log_fetch",
+     "source": "<source name>",
+     "template": "<Drain3 템플릿 문자열>",
+     "count": int,
+     "ratio_or_total": "<예: 387/1500>"}
+- evidence 의 두 번째 이후엔 다른 빈발 템플릿이나 burst 시점 기록 첨부.
 
 출력은 JSON 한 객체:
 {
-  "reasoning": "PG error 에 deadlock 패턴이 N건 burst 되었고 직전에 lock timeout 이 ... — 한국어 2~3 문장",
+  "reasoning": "...",
   "findings": [
     {"title": str, "severity": "info"|"warn"|"error", "evidence": [...], "next_actions": [str, ...]}, ...
   ]
