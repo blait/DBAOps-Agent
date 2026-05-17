@@ -5,13 +5,15 @@ from __future__ import annotations
 import streamlit as st
 
 
-_PHASE_ICON = {
-    "enter":   "▶",
-    "exit":    "■",
+# 노드 phase 별 아바타 — st.chat_message(avatar=...) 는 단일 emoji 만 허용.
+# `•` `▶` `■` 같은 단순 글자는 이미지 변환에서 실패한다.
+_PHASE_AVATAR = {
+    "enter":   "🚪",
+    "exit":    "🏁",
     "thought": "💭",
     "warn":    "⚠️",
     "error":   "❌",
-    "info":    "•",
+    "info":    "🤖",
 }
 
 
@@ -69,7 +71,6 @@ def render(report: dict) -> None:
     for ev in trace:
         node = ev.get("node", "?")
         phase = ev.get("phase", "info")
-        icon = _PHASE_ICON.get(phase, "•")
         summary = ev.get("summary", "")
         reasoning = ev.get("reasoning", "")
         ms = ev.get("duration_ms")
@@ -79,7 +80,7 @@ def render(report: dict) -> None:
             st.markdown(f"---\n##### {_label(node)}")
             continue
 
-        avatar = "🤖" if phase == "thought" else icon
+        avatar = _PHASE_AVATAR.get(phase, "🤖")
         with st.chat_message("assistant", avatar=avatar):
             header = f"**{_label(node)}** · `{summary}`"
             if ms is not None:
