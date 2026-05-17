@@ -1,4 +1,4 @@
-"""DBAOps-Agent Streamlit UI — 분석 / 시나리오 트리거 / 분석 뷰 4종."""
+"""DBAOps-Agent Streamlit UI — fast 그래프 / swarm streaming + 시나리오 트리거."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import streamlit as st
 
 import ecs_client
 from agentcore_client import invoke as agentcore_invoke
+from agentcore_client import invoke_stream as agentcore_invoke_stream
 from components import view_dashboard, view_story, view_swarm, view_trace, view_triage
 from components.request_form import build_request
 
@@ -27,51 +28,80 @@ with st.sidebar:
     st.caption(f"runtime: `{runtime_arn.rsplit('/',1)[-1] or '(unset)'}`")
 
 
-# ───────────────────────────── 분석 결과 캐시 ─────────────────────────────
+# ───────────────────────────── 분석 호출 ─────────────────────────────
 if submit:
     if not runtime_arn:
         st.warning("AGENTCORE_RUNTIME_ARN 이 비어있어요.")
         st.stop()
-    t0 = datetime.now(timezone.utc)
-    with st.spinner("AgentCore Runtime 호출 중..."):
-        result = agentcore_invoke(request)
-    elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
-    st.session_state["last_result"] = result
-    st.session_state["last_elapsed"] = elapsed
     st.session_state["last_request"] = request
+    if (request.get("mode") or "fast").lower() == "swarm":
+        # streaming — 결과는 Swarm 탭이 직접 받아 렌더
+        st.session_state["last_result"] = {"swarm_stream_pending": True}
+        st.session_state["last_elapsed"] = None
+    else:
+        t0 = datetime.now(timezone.utc)
+        with st.spinner("AgentCore Runtime 호출 중..."):
+            result_obj = agentcore_invoke(request)
+        st.session_state["last_result"] = result_obj
+        st.session_state["last_elapsed"] = (datetime.now(timezone.utc) - t0).total_seconds()
 
 result = st.session_state.get("last_result")
 elapsed = st.session_state.get("last_elapsed")
 
 
 # ───────────────────────────── Tabs ─────────────────────────────
-tab_triage, tab_story, tab_dash, tab_trace, tab_swarm, tab_raw, tab_gen = st.tabs(
+tab_swarm, tab_triage, tab_story, tab_dash, tab_trace, tab_raw, tab_gen = st.tabs(
     [
+        "🐝 Swarm",
         "🚨 Triage",
         "📖 Incident Story",
         "🗂 Domain Dashboard",
         "🧠 Thought Process",
-        "🐝 Swarm",
         "🧾 Raw",
         "🧪 Generators",
     ]
 )
 
 
-def _gate_result(tab):
-    """결과가 없으면 안내 후 None 반환."""
+def _gate_report(tab):
+    """fast 모드 결과 (report)가 있으면 반환, 없으면 안내 후 None."""
     if not result:
         tab.info("좌측에서 **분석 실행** 을 눌러 리포트를 받아오세요.")
         return None
-    if "error" in result:
+    if "error" in result and not result.get("swarm"):
         tab.error(result["error"])
         return None
-    return result.get("report") or {}
+    rep = result.get("report")
+    if not rep:
+        tab.info("이번 응답은 swarm 모드입니다. 🐝 Swarm 탭을 보세요.")
+        return None
+    return rep
 
+
+# Swarm — streaming 또는 캐시된 결과
+with tab_swarm:
+    req_cached = st.session_state.get("last_request") or {}
+    if not result:
+        st.info("swarm 모드로 분석 실행하면 여기에 specialist 대화가 실시간 표시됩니다.")
+    elif result.get("swarm_stream_pending"):
+        t0 = datetime.now(timezone.utc)
+        events = agentcore_invoke_stream(req_cached)
+        final = view_swarm.render_stream(events, request=req_cached)
+        st.session_state["last_result"] = {"swarm": final, "request": req_cached}
+        st.session_state["last_elapsed"] = (datetime.now(timezone.utc) - t0).total_seconds()
+        st.caption(f"⏱ {st.session_state['last_elapsed']:.1f}s")
+    elif "swarm" in result:
+        if elapsed:
+            st.caption(f"⏱ {elapsed:.1f}s")
+        view_swarm.render(result["swarm"], request=req_cached)
+    elif "error" in result:
+        st.error(result["error"])
+    else:
+        st.info("이번 응답은 fast 모드입니다. 사이드바에서 `swarm` 으로 바꿔 실행해 보세요.")
 
 # Triage
 with tab_triage:
-    rep = _gate_result(tab_triage)
+    rep = _gate_report(tab_triage)
     if rep is not None:
         if elapsed:
             st.caption(f"⏱ {elapsed:.1f}s")
@@ -79,38 +109,27 @@ with tab_triage:
 
 # Story
 with tab_story:
-    rep = _gate_result(tab_story)
+    rep = _gate_report(tab_story)
     if rep is not None:
         view_story.render(rep)
 
 # Dashboard
 with tab_dash:
-    rep = _gate_result(tab_dash)
+    rep = _gate_report(tab_dash)
     if rep is not None:
         view_dashboard.render(rep)
 
 # Trace
 with tab_trace:
-    rep = _gate_result(tab_trace)
+    rep = _gate_report(tab_trace)
     if rep is not None:
         view_trace.render(rep)
-
-# Swarm
-with tab_swarm:
-    if not result:
-        st.info("swarm 모드로 분석 실행하면 여기에 핸드오프 시퀀스가 보입니다.")
-    elif "error" in result:
-        st.error(result["error"])
-    elif "swarm" in result:
-        view_swarm.render(result["swarm"], request=st.session_state.get("last_request"))
-    else:
-        st.info("이번 응답은 fast 모드입니다. 사이드바에서 모드를 `swarm` 으로 바꿔 다시 실행해 보세요.")
 
 # Raw
 with tab_raw:
     if not result:
         st.info("좌측에서 **분석 실행** 을 눌러 리포트를 받아오세요.")
-    elif "error" in result:
+    elif "error" in result and not result.get("swarm"):
         st.error(result["error"])
     else:
         rep = result.get("report") or {}

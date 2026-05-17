@@ -1,10 +1,13 @@
 """AgentCore Runtime entrypoint.
 
 AgentCore Runtime 은 컨테이너 내부에서 :8080/invocations 로 들어오는 POST 를 처리하길 기대한다.
-(2025년 spec; 환경에 따라 /ping, /invocations 두 endpoint 만 노출하면 된다.)
 표준 라이브러리만으로 가벼운 HTTP 서버를 띄워, 외부 의존을 최소화한다.
 
-로컬에서는 `python -m dbaops_agent.runtime_entry --once` 로 단일 invocation smoke 도 가능.
+응답 형태:
+- mode=fast (default): 한 번에 JSON 한 객체 반환
+- mode=swarm + (Accept: application/x-ndjson 또는 request.stream=true): NDJSON streaming.
+  한 줄에 한 이벤트씩 chunked transfer 로 즉시 flush.
+- mode=swarm 그 외: 동기 호출, 한 번에 JSON 반환 (호환용)
 """
 
 from __future__ import annotations
@@ -38,7 +41,6 @@ def handler(event: dict, context: Any | None = None) -> dict:
     mode = (request.get("mode") or "fast").lower()
 
     if mode == "swarm":
-        # ReAct/swarm 모드 — 도메인 specialist 3 + 자율 핸드오프
         from .swarm_graph import invoke_swarm
         try:
             result = invoke_swarm(
@@ -50,7 +52,6 @@ def handler(event: dict, context: Any | None = None) -> dict:
             logger.exception("swarm invoke failed")
             return {"error": str(e), "request": request}
 
-    # default: fast 모드 — 정해진 LangGraph 흐름
     initial: AnalysisState = {
         "request": request,
         "raw_signals": {},
@@ -75,29 +76,83 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
+    def _read_body(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            return json.loads(raw.decode() or "{}")
+        except json.JSONDecodeError:
+            return {}
+
+    def _respond_json(self, status: int, body: dict) -> None:
+        data = json.dumps(body, ensure_ascii=False).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _respond_ndjson_stream(self, request: dict) -> None:
+        from .swarm_graph import iter_swarm
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Stream", "ndjson")
+        self.end_headers()
+
+        def write_chunk(payload: bytes) -> None:
+            self.wfile.write(f"{len(payload):X}\r\n".encode())
+            self.wfile.write(payload)
+            self.wfile.write(b"\r\n")
+            self.wfile.flush()
+
+        try:
+            for ev in iter_swarm(
+                request,
+                recursion_limit=int(os.environ.get("SWARM_RECURSION_LIMIT", "30")),
+            ):
+                line = (json.dumps(ev, ensure_ascii=False, default=str) + "\n").encode()
+                write_chunk(line)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("swarm stream failed")
+            err = (json.dumps({"type": "error", "error": str(e)}, ensure_ascii=False) + "\n").encode()
+            try:
+                write_chunk(err)
+            except Exception:
+                pass
+        finally:
+            try:
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+            except Exception:
+                pass
+
     def do_POST(self):  # noqa: N802
         if self.path not in ("/invocations", "/invoke"):
             self.send_response(404)
             self.end_headers()
             return
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length) if length else b"{}"
         try:
-            event = json.loads(raw.decode() or "{}")
+            event = self._read_body()
+            request = event.get("request") or {}
+            mode = (request.get("mode") or "fast").lower()
+            stream_requested = (
+                request.get("stream") is True
+                or "ndjson" in (self.headers.get("Accept") or "").lower()
+            )
+            if mode == "swarm" and stream_requested:
+                self._respond_ndjson_stream(request)
+                return
             result = handler(event)
-            body = json.dumps(result, ensure_ascii=False).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._respond_json(200, result)
         except Exception as e:
             logger.exception("invoke failed")
-            err = json.dumps({"error": str(e)}).encode()
-            self.send_response(500)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(err)
+            try:
+                self._respond_json(500, {"error": str(e)})
+            except Exception:
+                pass
 
 
 def serve(host: str = "0.0.0.0", port: int = 8080) -> None:

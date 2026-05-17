@@ -2,13 +2,17 @@
 
 Strands Agents 의 swarm 패턴과 동일한 컨셉.
 사용 패키지: langgraph-swarm (https://github.com/langchain-ai/langgraph-swarm-py)
+
+invoke_swarm  — 동기 호출, 최종 상태만 반환
+iter_swarm    — generator, event 단위로 stream (thinking / tool_call / tool_result / handoff)
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
-from typing import Any
+from typing import Any, Iterator
 
 from langchain_core.messages import SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
@@ -20,7 +24,6 @@ from .tools.mcp_tools import (
     DB_TOOLS,
     LOG_TOOLS,
     OS_TOOLS,
-    cloudwatch_metric,
     infra_context,
 )
 
@@ -50,6 +53,7 @@ def _system_for(name: str, role: str) -> str:
 3. 충분한 finding 을 모으고 더 이상 follow-up 이 필요 없다고 판단되면 최종 정리만 출력하고 멈추세요 (handoff 없이).
 4. 한국어로 추론을 명시적으로 드러내며 작업하세요. 예: "메모리가 81%로 살짝 낮으니 DB 측 connection 폭증을 db_specialist 에게 확인 요청".
 5. 이미 다른 specialist 가 확인한 데이터는 메시지 히스토리에서 참고하고 중복 호출하지 마세요.
+6. 한 턴에 도구 호출은 1~2 개로 제한 — 같은 결과를 얻기 위해 여러 키 패턴을 동시에 시도하지 마세요. 하나 결과 보고 다음 결정.
 """
 
 
@@ -122,6 +126,88 @@ def build_swarm():
     return swarm
 
 
+# ───────────────────────── 메시지 정규화 ─────────────────────────
+
+
+def _flatten_text(content: Any) -> str:
+    """Anthropic content blocks 또는 str 을 평문 텍스트로."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for c in content:
+            if isinstance(c, dict):
+                t = c.get("type")
+                if t == "text":
+                    txt = c.get("text") or ""
+                    if txt:
+                        parts.append(txt)
+                elif t == "tool_use":
+                    # tool_use 블록은 message.tool_calls 로 별도 추출되므로 텍스트엔 포함 안 함
+                    pass
+                elif t == "tool_result":
+                    # tool_result 블록 (역시 별도 ToolMessage 로 들어옴)
+                    pass
+                elif "text" in c:
+                    parts.append(str(c.get("text")))
+            elif isinstance(c, str):
+                parts.append(c)
+        return "\n".join(p for p in parts if p)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _normalize_tool_calls(m: Any) -> list[dict]:
+    """LangChain Message.tool_calls + content 안의 tool_use 블록 둘 다 흡수."""
+    calls: list[dict] = []
+    for tc in (getattr(m, "tool_calls", None) or []):
+        calls.append({
+            "id":   tc.get("id"),
+            "name": tc.get("name"),
+            "args": tc.get("args"),
+        })
+    content = getattr(m, "content", None)
+    if isinstance(content, list):
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "tool_use":
+                calls.append({
+                    "id":   c.get("id"),
+                    "name": c.get("name"),
+                    "args": c.get("input"),
+                })
+    # dedupe by id
+    seen: set[str] = set()
+    out: list[dict] = []
+    for tc in calls:
+        key = tc.get("id") or json.dumps(tc, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(tc)
+    return out
+
+
+def normalize_message(m: Any) -> dict:
+    """LangChain Message → UI/JSON 친화 dict."""
+    role = getattr(m, "type", None) or "ai"
+    name = getattr(m, "name", None)
+    content = getattr(m, "content", None)
+    text = _flatten_text(content)
+    tool_calls = _normalize_tool_calls(m)
+    out: dict = {
+        "role": role,
+        "name": name,
+        "text": text[:8000] if text else "",
+        "tool_calls": tool_calls,
+    }
+    # ToolMessage 는 tool_call_id 가 있어 어떤 호출의 결과인지 매칭 가능
+    tcid = getattr(m, "tool_call_id", None)
+    if tcid:
+        out["tool_call_id"] = tcid
+    return out
+
+
 # ───────────────────────── 호출 헬퍼 ─────────────────────────
 
 
@@ -135,20 +221,9 @@ def _get_swarm():
     return _SWARM
 
 
-def invoke_swarm(request: dict[str, Any], *,
-                 recursion_limit: int = 30,
-                 ping_pong_window: int = 6,
-                 ping_pong_min_unique: int = 2) -> dict[str, Any]:
-    """swarm 에 사용자 요청을 던지고 messages + handoff 시퀀스를 반환.
-
-    안전 가드:
-    - recursion_limit: 그래프 단계 수 상한
-    - ping-pong 감지: 최근 N 단계 active_agent 가 unique 가 적으면 abort
-    """
-    from langchain_core.messages import HumanMessage
-
+def _user_text(request: dict[str, Any]) -> str:
     tr = (request.get("time_range") or {})
-    user_text = (
+    return (
         f"분석 요청: {request.get('free_text','(없음)')}\n"
         f"lens: {request.get('lens','?')}\n"
         f"time_range: {tr.get('start','?')} → {tr.get('end','?')}\n"
@@ -157,51 +232,108 @@ def invoke_swarm(request: dict[str, Any], *,
         f"최종적으로 모든 specialist 가 충분히 분석했다고 판단되면, 발견사항 / 가설 / 다음 확인 항목을 한국어로 정리해 마무리하세요."
     )
 
+
+def iter_swarm(request: dict[str, Any], *,
+               recursion_limit: int = 30,
+               ping_pong_window: int = 6,
+               ping_pong_min_unique: int = 2) -> Iterator[dict]:
+    """swarm 을 stream 모드로 돌리며 의미 있는 이벤트를 yield 한다.
+
+    이벤트 타입:
+      - {"type": "start"}
+      - {"type": "handoff", "agent": str}
+      - {"type": "message", "message": <normalized>}    # 새 메시지 한 건이 추가될 때
+      - {"type": "abort", "reason": str}
+      - {"type": "done", "final_active_agent": str, "handoffs": [...], "n_messages": int}
+      - {"type": "error", "error": str}
+    """
+    from langchain_core.messages import HumanMessage
+
+    yield {"type": "start"}
+
     config = {
         "configurable": {"thread_id": request.get("session_id") or "default"},
         "recursion_limit": recursion_limit,
     }
-
     handoffs: list[str] = []
+    seen_ids: set[str] = set()
     last_active: list[str] = []
-
     final_state: dict[str, Any] = {}
+
     try:
         for chunk in _get_swarm().stream(
-            {"messages": [HumanMessage(content=user_text)]},
+            {"messages": [HumanMessage(content=_user_text(request))]},
             config=config,
             stream_mode="values",
         ):
+            final_state = chunk
+
+            # active_agent 변경 = 핸드오프
             active = chunk.get("active_agent")
             if active and (not last_active or last_active[-1] != active):
                 last_active.append(active)
                 handoffs.append(active)
+                yield {"type": "handoff", "agent": active}
+
+            # 신규 메시지 단위로 emit
+            for m in (chunk.get("messages") or []):
+                mid = getattr(m, "id", None) or id(m)
+                key = str(mid)
+                if key in seen_ids:
+                    continue
+                seen_ids.add(key)
+                yield {"type": "message", "message": normalize_message(m)}
+
             # ping-pong 감지
             window = last_active[-ping_pong_window:]
             if len(window) >= ping_pong_window and len(set(window)) <= ping_pong_min_unique:
                 logger.warning("ping-pong detected — aborting (window=%s)", window)
-                final_state = chunk
-                final_state["_aborted"] = "ping_pong"
+                yield {"type": "abort", "reason": "ping_pong"}
                 break
-            final_state = chunk
     except Exception as e:  # noqa: BLE001
-        logger.exception("swarm invoke failed")
-        return {"error": str(e), "handoffs": handoffs}
+        logger.exception("swarm stream failed")
+        yield {"type": "error", "error": str(e)}
+        return
 
-    return {
-        "messages": [
-            {
-                "role": getattr(m, "type", "?"),
-                "name":  getattr(m, "name", None),
-                "content": (m.content if isinstance(m.content, str) else str(m.content))[:8000],
-                "tool_calls": [
-                    {"name": tc.get("name"), "args": tc.get("args")}
-                    for tc in (getattr(m, "tool_calls", None) or [])
-                ],
-            }
-            for m in (final_state.get("messages") or [])
-        ],
-        "handoffs": handoffs,
+    yield {
+        "type": "done",
         "final_active_agent": final_state.get("active_agent"),
-        "aborted": final_state.get("_aborted"),
+        "handoffs": handoffs,
+        "n_messages": len(final_state.get("messages") or []),
+    }
+
+
+def invoke_swarm(request: dict[str, Any], *,
+                 recursion_limit: int = 30,
+                 ping_pong_window: int = 6,
+                 ping_pong_min_unique: int = 2) -> dict[str, Any]:
+    """동기 swarm 호출 — 모든 이벤트를 모아 최종 결과 dict 반환 (호환용)."""
+    messages: list[dict] = []
+    handoffs: list[str] = []
+    aborted: str | None = None
+    final_active: str | None = None
+    err: str | None = None
+
+    for ev in iter_swarm(request, recursion_limit=recursion_limit,
+                         ping_pong_window=ping_pong_window,
+                         ping_pong_min_unique=ping_pong_min_unique):
+        t = ev.get("type")
+        if t == "message":
+            messages.append(ev["message"])
+        elif t == "handoff":
+            handoffs.append(ev["agent"])
+        elif t == "abort":
+            aborted = ev.get("reason")
+        elif t == "done":
+            final_active = ev.get("final_active_agent")
+        elif t == "error":
+            err = ev.get("error")
+
+    if err:
+        return {"error": err, "handoffs": handoffs, "messages": messages}
+    return {
+        "messages": messages,
+        "handoffs": handoffs,
+        "final_active_agent": final_active,
+        "aborted": aborted,
     }
