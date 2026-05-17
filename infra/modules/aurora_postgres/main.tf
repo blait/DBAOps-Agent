@@ -39,17 +39,51 @@ resource "aws_rds_cluster_parameter_group" "this" {
   description = "DBAOps Aurora PG cluster params"
 
   parameter {
+    # auto_explain 추가 — slow query 시나리오 분석 시 자동 EXPLAIN 출력.
     name         = "shared_preload_libraries"
-    value        = "pg_stat_statements"
+    value        = "pg_stat_statements,auto_explain"
     apply_method = "pending-reboot"
   }
   parameter {
+    # 500ms 이상 statement 는 PG 로그에 LOG: duration: ... statement: ... 로 적힌다.
     name  = "log_min_duration_statement"
     value = "500"
   }
   parameter {
+    # deadlock_timeout (1s) 넘어선 락 대기는 LOG: process X still waiting for ... 로 적힌다.
     name  = "log_lock_waits"
     value = "1"
+  }
+  parameter {
+    # connection_spike 시나리오 — connection authorized 라인이 로그에 burst.
+    name  = "log_connections"
+    value = "1"
+  }
+  parameter {
+    name  = "log_disconnections"
+    value = "1"
+  }
+  parameter {
+    # 0 이면 모든 temp file 사용을 로깅 — slow query 의 work_mem 부족 단서.
+    name  = "log_temp_files"
+    value = "0"
+  }
+  parameter {
+    # auto_explain — 500ms 넘는 statement 의 EXPLAIN 결과를 로그에 자동 출력.
+    name         = "auto_explain.log_min_duration"
+    value        = "500"
+    apply_method = "pending-reboot"
+  }
+  parameter {
+    # log_analyze=1 이면 실측 시간까지. CPU 비용 있어 production 권장 X (PoC 만).
+    name         = "auto_explain.log_analyze"
+    value        = "1"
+    apply_method = "pending-reboot"
+  }
+  parameter {
+    name         = "auto_explain.log_buffers"
+    value        = "1"
+    apply_method = "pending-reboot"
   }
 }
 

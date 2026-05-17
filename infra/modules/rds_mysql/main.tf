@@ -43,16 +43,36 @@ resource "aws_db_parameter_group" "this" {
     value = "1"
   }
   parameter {
+    # PoC: 슬로우 쿼리 시나리오의 hash join 쿼리가 실측 ~340ms 라 1s 임계값을 넘지 못해
+    # slow log 에 안 찍힘. 0.3s 로 낮춰 시나리오 효과를 보장.
     name  = "long_query_time"
-    value = "1"
+    value = "0.3"
+  }
+  parameter {
+    # 인덱스 없이 풀스캔하는 쿼리는 무조건 slow log 로 — 시나리오의 핵심 보장.
+    name         = "log_queries_not_using_indexes"
+    value        = "1"
+    apply_method = "pending-reboot"
   }
   parameter {
     name  = "general_log"
     value = "1"
   }
   parameter {
+    # TABLE 모드 — db_specialist 가 `SELECT * FROM mysql.slow_log` 로 즉시 SQL 분석.
+    # FILE 형태 raw slow log 는 RDS DownloadDBLogFilePortion API 로 대체 가능 (log_specialist 경로).
+    # RDS MySQL 8.0 parameter group API 가 'TABLE,FILE' 같은 comma-list 를 enum 으로 잘못
+    # 처리해 InvalidParameterValue 가 떨어진다. 그래서 TABLE 단독으로 설정.
     name  = "log_output"
-    value = "FILE"
+    value = "TABLE"
+  }
+  parameter {
+    # t4g.micro default=0. performance_schema 끄면 events_statements_summary_by_digest /
+    # data_lock_waits / events_waits_* 테이블이 비어 db_specialist 의 디지스트/락 분석 불능.
+    # static 파라미터라 reboot 필수.
+    name         = "performance_schema"
+    value        = "1"
+    apply_method = "pending-reboot"
   }
 }
 

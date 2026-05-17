@@ -14,7 +14,7 @@ from .._secrets import mysql_dsn
 logger = logging.getLogger(__name__)
 
 
-def _ensure_data(dsn: dict, n_users: int = 50_000, n_orders: int = 200_000) -> None:
+def _ensure_data(dsn: dict, n_users: int = 100_000, n_orders: int = 1_000_000) -> None:
     conn = pymysql.connect(autocommit=False, **dsn)
     try:
         with conn.cursor() as cur:
