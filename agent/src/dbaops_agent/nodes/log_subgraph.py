@@ -67,7 +67,7 @@ def _fetch(state: AnalysisState, sources: list[dict[str, str]]) -> list[dict]:
             continue
         try:
             r = client.call(
-                "s3_log_fetch",
+                "s3-log-fetch___s3_log_fetch",
                 {
                     "bucket": bucket,
                     "key": s["key"],

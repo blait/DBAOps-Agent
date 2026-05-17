@@ -165,16 +165,19 @@ def list_targets(client, gateway_id: str) -> list[dict]:
     return out
 
 
-_ALLOWED_SCHEMA_KEYS = {"type", "properties", "required", "items", "description"}
+_DROP_KEYS = {"default", "enum", "format", "minLength", "maxLength", "minimum", "maximum", "additionalProperties", "minItems", "maxItems"}
 
 
 def _sanitize_schema(node: Any) -> Any:
-    """AgentCore inputSchema 가 허용하는 키만 남긴다 (default/enum/format/minLength 등 제거)."""
+    """AgentCore inputSchema 가 거부하는 키만 제거한다.
+    type/properties/required/items/description 등 핵심 키는 보존.
+    """
     if isinstance(node, dict):
         out: dict = {}
         for k, v in node.items():
-            if k in _ALLOWED_SCHEMA_KEYS:
-                out[k] = _sanitize_schema(v)
+            if k in _DROP_KEYS:
+                continue
+            out[k] = _sanitize_schema(v)
         return out
     if isinstance(node, list):
         return [_sanitize_schema(x) for x in node]
@@ -272,9 +275,88 @@ def upsert_runtime(client, role_arn: str, ecr_uri: str, gateway_endpoint: str) -
     )
 
 
+_TOOL_TARGETS = [
+    # (target_name, tool_io.json 경로, terraform output key for lambda arn)
+    ("prometheus-query",   "prometheus_query/tool_io.json",   "prometheus-query"),
+    ("cloudwatch-metrics", "cloudwatch_metrics/tool_io.json", "cloudwatch-metrics"),
+    ("rds-pi",             "rds_pi/tool_io.json",             "rds-pi"),
+    ("sql-readonly",       "sql_readonly/tool_io.json",       "sql-readonly"),
+    ("msk-metrics",        "msk_metrics/tool_io.json",        "msk-metrics"),
+    ("s3-log-fetch",       "s3_log_fetch/tool_io.json",       "s3-log-fetch"),
+]
+
+
+def get_cognito_client_secret(user_pool_id: str, client_id: str) -> str:
+    cognito = boto3.client("cognito-idp", region_name=REGION)
+    desc = cognito.describe_user_pool_client(UserPoolId=user_pool_id, ClientId=client_id)
+    return desc["UserPoolClient"]["ClientSecret"]
+
+
+def cognito_token_url(domain: str) -> str:
+    return f"https://{domain}.auth.{REGION}.amazoncognito.com/oauth2/token"
+
+
+def upsert_runtime_with_auth(
+    client,
+    role_arn: str,
+    ecr_uri: str,
+    gateway_endpoint: str,
+    cognito_token_url_value: str,
+    cognito_client_id: str,
+    cognito_client_secret: str,
+) -> dict | None:
+    image_uri = f"{ecr_uri}:latest"
+    cfg = {"containerConfiguration": {"containerUri": image_uri}}
+
+    paginator = client.get_paginator("list_agent_runtimes")
+    existing = None
+    for page in paginator.paginate():
+        for rt in page.get("agentRuntimes", []):
+            if rt.get("agentRuntimeName") == RUNTIME_NAME:
+                existing = rt
+                break
+        if existing:
+            break
+
+    env_vars = {
+        "BEDROCK_REGION":        REGION,
+        "BEDROCK_MODEL_ID":      "global.anthropic.claude-opus-4-7",
+        "GATEWAY_ENDPOINT":      gateway_endpoint,
+        "TOOL_BUDGET":           "128",
+        "DBAOPS_IGNORE_BUDGET":  "1",
+        "LOG_LEVEL":             "DEBUG",
+        "COGNITO_TOKEN_URL":     cognito_token_url_value,
+        "COGNITO_CLIENT_ID":     cognito_client_id,
+        "COGNITO_CLIENT_SECRET": cognito_client_secret,
+        "COGNITO_SCOPE":         "dbaops-gateway/invoke",
+    }
+
+    if existing:
+        rid = existing["agentRuntimeId"]
+        logger.info("updating agent runtime %s", rid)
+        return client.update_agent_runtime(
+            agentRuntimeId=rid,
+            description="DBAOps PoC agent runtime",
+            roleArn=role_arn,
+            agentRuntimeArtifact=cfg,
+            networkConfiguration={"networkMode": "PUBLIC"},
+            environmentVariables=env_vars,
+        )
+    logger.info("creating agent runtime %s", RUNTIME_NAME)
+    return client.create_agent_runtime(
+        agentRuntimeName=RUNTIME_NAME,
+        description="DBAOps PoC agent runtime",
+        roleArn=role_arn,
+        agentRuntimeArtifact=cfg,
+        networkConfiguration={"networkMode": "PUBLIC"},
+        environmentVariables=env_vars,
+    )
+
+
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--skip-runtime", action="store_true", help="agent runtime 등록은 건너뜀 (이미지 push 전)")
+    p.add_argument("--skip-targets", action="store_true", help="Lambda target 등록은 건너뜀 (Lambda 미배포 시)")
     args = p.parse_args(argv)
 
     outputs = tf_output()
@@ -283,9 +365,9 @@ def main(argv: list[str]) -> int:
     gateway_role = outputs["agentcore_gateway_role_arn"]
     runtime_role = outputs["agentcore_runtime_role_arn"]
     ecr_uri = outputs["ecr_repository_url"]
-    prom_lambda = outputs["prometheus_query_lambda_arn"]
+    lambda_arns = outputs.get("mcp_lambda_arns", {}) or {}
 
-    ensure_cognito_domain(user_pool_id)
+    domain = ensure_cognito_domain(user_pool_id)
 
     ac = boto3.client("bedrock-agentcore-control", region_name=REGION)
     gw = upsert_gateway(ac, gateway_role, user_pool_id, app_client_id)
@@ -293,21 +375,36 @@ def main(argv: list[str]) -> int:
     gw_url = gw.get("gatewayUrl") or gw.get("mcpEndpoint") or ""
     logger.info("gateway id=%s url=%s", gw_id, gw_url)
 
-    # Phase 1 등록 도구: prometheus_query 만 (나머지 Lambda 는 Phase 2)
-    spec = json.loads((TOOLS_DIR / "prometheus_query" / "tool_io.json").read_text())
-    upsert_target(
-        ac,
-        gw_id,
-        target_name="prometheus-query",
-        lambda_arn=prom_lambda,
-        tools=[schema_to_tool_def(spec)],
-    )
+    if not args.skip_targets:
+        for target_name, tool_io_path, lambda_key in _TOOL_TARGETS:
+            spec_path = TOOLS_DIR / tool_io_path
+            arn = lambda_arns.get(lambda_key)
+            if not arn:
+                logger.warning("lambda for %s not in tf outputs (mcp_lambda_arns) — skipping", target_name)
+                continue
+            spec = json.loads(spec_path.read_text())
+            upsert_target(
+                ac,
+                gw_id,
+                target_name=target_name,
+                lambda_arn=arn,
+                tools=[schema_to_tool_def(spec)],
+            )
 
     if args.skip_runtime:
         logger.info("--skip-runtime 지정 — agent runtime 등록 생략")
     else:
         try:
-            upsert_runtime(ac, runtime_role, ecr_uri, gw_url)
+            client_secret = get_cognito_client_secret(user_pool_id, app_client_id)
+            upsert_runtime_with_auth(
+                ac,
+                runtime_role,
+                ecr_uri,
+                gw_url,
+                cognito_token_url(domain),
+                app_client_id,
+                client_secret,
+            )
         except ClientError as e:
             logger.error("agent runtime upsert failed: %s", e)
             return 2

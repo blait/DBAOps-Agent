@@ -85,7 +85,7 @@ def _fetch_pg(state: AnalysisState, plan: dict[str, Any]) -> list[dict]:
     for q in queries:
         try:
             r = client.call(
-                "sql_readonly",
+                "sql-readonly___sql_readonly",
                 {"engine": "postgres", "db_id": db_id[0], "sql": q["sql"]},
                 cache=cache,
                 budget=budget,
@@ -109,7 +109,7 @@ def _fetch_mysql(state: AnalysisState, plan: dict[str, Any]) -> list[dict]:
     for q in queries:
         try:
             r = client.call(
-                "sql_readonly",
+                "sql-readonly___sql_readonly",
                 {"engine": "mysql", "db_id": db_id[0], "sql": q["sql"]},
                 cache=cache,
                 budget=budget,
@@ -135,7 +135,7 @@ def _fetch_kafka(state: AnalysisState, plan: dict[str, Any]) -> list[dict]:
     for m in metrics:
         try:
             r = client.call(
-                "msk_metrics",
+                "msk-metrics___msk_metrics",
                 {"cluster_arn": cluster_arn, "metric": m["metric"], "start": start, "end": end},
                 cache=cache,
                 budget=budget,

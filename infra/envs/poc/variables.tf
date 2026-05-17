@@ -27,3 +27,9 @@ variable "bedrock_model_id" {
   type        = string
   default     = "claude-opus-4-7"
 }
+
+variable "mcp_images_pushed" {
+  description = "MCP Lambda 이미지가 ECR 에 push 된 후 true 로 두 번째 apply"
+  type        = bool
+  default     = false
+}

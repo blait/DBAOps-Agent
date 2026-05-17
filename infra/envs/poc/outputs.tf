@@ -89,3 +89,34 @@ output "data_gen_repo_url" {
 output "log_gen_repo_url" {
   value = module.ecs_generators.log_gen_repo_url
 }
+
+output "mcp_repo_cloudwatch_metrics" {
+  value = module.lambda_cloudwatch_metrics.ecr_repository_url
+}
+
+output "mcp_repo_rds_pi" {
+  value = module.lambda_rds_pi.ecr_repository_url
+}
+
+output "mcp_repo_sql_readonly" {
+  value = module.lambda_sql_readonly.ecr_repository_url
+}
+
+output "mcp_repo_msk_metrics" {
+  value = module.lambda_msk_metrics.ecr_repository_url
+}
+
+output "mcp_repo_s3_log_fetch" {
+  value = module.lambda_s3_log_fetch.ecr_repository_url
+}
+
+output "mcp_lambda_arns" {
+  value = {
+    "prometheus-query"   = module.lambda_prometheus_query.function_arn
+    "cloudwatch-metrics" = module.lambda_cloudwatch_metrics.function_arn
+    "rds-pi"             = module.lambda_rds_pi.function_arn
+    "sql-readonly"       = module.lambda_sql_readonly.function_arn
+    "msk-metrics"        = module.lambda_msk_metrics.function_arn
+    "s3-log-fetch"       = module.lambda_s3_log_fetch.function_arn
+  }
+}

@@ -14,9 +14,14 @@ from ._common import llm_json, time_range, utc_iso
 logger = logging.getLogger(__name__)
 
 _PLAN_SYSTEM = """\
-You are a Linux/host metrics analyst. Output ONLY a JSON object:
-{"queries": [{"name": str, "promql": str}, ...]}
-3-6 queries covering CPU, memory, disk I/O, network. Use rate()/avg_over_time() where appropriate.
+You are a Linux/host metrics analyst writing PromQL for node_exporter on a single Prometheus host.
+Constraints:
+- Do NOT add `instance=~"..."` label filters. The Prometheus is single-target ("localhost:9100").
+- Use `node_cpu_seconds_total`, `node_memory_MemAvailable_bytes`, `node_memory_MemTotal_bytes`,
+  `node_disk_io_time_seconds_total`, `node_disk_read_bytes_total`, `node_disk_written_bytes_total`,
+  `node_network_receive_bytes_total`, `node_network_transmit_bytes_total`, `node_load5`.
+- Use rate(...[5m]) or avg_over_time(...[5m]).
+Output ONLY a JSON object: {"queries": [{"name": str, "promql": str}, ...]} (3-6 queries covering CPU, memory, disk I/O, network).
 No prose, no code fences.
 """
 
@@ -56,7 +61,7 @@ def _fetch(state: AnalysisState, queries: list[dict[str, str]]) -> dict[str, lis
     for q in queries:
         try:
             r = client.call(
-                "prometheus_query",
+                "prometheus-query___prometheus_query",
                 {"promql": q["promql"], "start": start, "end": end, "step": "30s"},
                 cache=cache,
                 budget=budget,

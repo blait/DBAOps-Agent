@@ -1,8 +1,7 @@
 ############################################
-# IAM module — 공통 실행 역할 베이스
+# IAM module — MCP Lambda 공통 실행 역할
 ############################################
-# Phase 1: MCP Lambda 공통 실행 역할만 정의.
-# Phase 2~: AgentCore Runtime 역할, ECS task 역할 추가.
+# PoC: 모든 MCP 도구가 이 base 역할을 공유. 권한은 도구별로 필요한 최대 합집합.
 
 data "aws_iam_policy_document" "lambda_assume" {
   statement {
@@ -27,4 +26,54 @@ resource "aws_iam_role_policy_attachment" "mcp_lambda_basic" {
 resource "aws_iam_role_policy_attachment" "mcp_lambda_vpc" {
   role       = aws_iam_role.mcp_lambda_base.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+
+resource "aws_iam_role_policy" "mcp_lambda_runtime" {
+  role = aws_iam_role.mcp_lambda_base.name
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:GetMetricData",
+          "cloudwatch:GetMetricStatistics",
+          "cloudwatch:ListMetrics"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "pi:GetResourceMetrics",
+          "pi:DescribeDimensionKeys",
+          "pi:GetDimensionKeyDetails",
+          "pi:GetResourceMetadata"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:ListBucket"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "kafka:GetBootstrapBrokers",
+          "kafka:DescribeCluster*",
+          "kafka:ListClusters*"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
 }

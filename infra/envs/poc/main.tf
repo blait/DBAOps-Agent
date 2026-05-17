@@ -126,3 +126,86 @@ module "lambda_prometheus_query" {
 
   extra_security_group_ids = []
 }
+
+############################################
+# Phase 2 MCP Lambdas — 5종 (컨테이너 이미지)
+############################################
+# 흐름: 첫 apply 는 image_pushed=false 로 ECR repo 만 생성 → scripts/build_mcp_images.sh 로
+# 이미지 push → 두 번째 apply 에 image_pushed=true 로 함수 생성.
+# variable mcp_images_pushed 로 한꺼번에 토글한다.
+
+module "lambda_cloudwatch_metrics" {
+  source = "../../modules/lambda_mcp_image"
+
+  environment  = var.environment
+  tool_name    = "cloudwatch-metrics"
+  image_pushed = var.mcp_images_pushed
+  timeout      = 30
+  memory_size  = 512
+  vpc_id       = module.network.vpc_id
+  subnet_ids   = module.network.private_subnet_ids
+  role_arn     = module.iam.mcp_lambda_base_role_arn
+}
+
+module "lambda_rds_pi" {
+  source = "../../modules/lambda_mcp_image"
+
+  environment  = var.environment
+  tool_name    = "rds-pi"
+  image_pushed = var.mcp_images_pushed
+  timeout      = 30
+  memory_size  = 512
+  vpc_id       = module.network.vpc_id
+  subnet_ids   = module.network.private_subnet_ids
+  role_arn     = module.iam.mcp_lambda_base_role_arn
+}
+
+module "lambda_sql_readonly" {
+  source = "../../modules/lambda_mcp_image"
+
+  environment  = var.environment
+  tool_name    = "sql-readonly"
+  image_pushed = var.mcp_images_pushed
+  timeout      = 30
+  memory_size  = 512
+  vpc_id       = module.network.vpc_id
+  subnet_ids   = module.network.private_subnet_ids
+  role_arn     = module.iam.mcp_lambda_base_role_arn
+
+  env_vars = {
+    SQL_READONLY_PG_HOST       = replace(module.aurora_postgres.endpoint, "/:.*$/", "")
+    SQL_READONLY_PG_DBNAME     = module.aurora_postgres.database_name
+    SQL_READONLY_PG_SECRET_ARN = module.aurora_postgres.master_user_secret_arn
+    SQL_READONLY_MYSQL_HOST       = replace(module.rds_mysql.endpoint, "/:.*$/", "")
+    SQL_READONLY_MYSQL_DBNAME     = module.rds_mysql.database_name
+    SQL_READONLY_MYSQL_SECRET_ARN = module.rds_mysql.master_user_secret_arn
+    SQL_READONLY_MAX_ROWS         = "1000"
+    SQL_READONLY_TIMEOUT_MS       = "5000"
+  }
+}
+
+module "lambda_msk_metrics" {
+  source = "../../modules/lambda_mcp_image"
+
+  environment  = var.environment
+  tool_name    = "msk-metrics"
+  image_pushed = var.mcp_images_pushed
+  timeout      = 30
+  memory_size  = 512
+  vpc_id       = module.network.vpc_id
+  subnet_ids   = module.network.private_subnet_ids
+  role_arn     = module.iam.mcp_lambda_base_role_arn
+}
+
+module "lambda_s3_log_fetch" {
+  source = "../../modules/lambda_mcp_image"
+
+  environment  = var.environment
+  tool_name    = "s3-log-fetch"
+  image_pushed = var.mcp_images_pushed
+  timeout      = 60
+  memory_size  = 512
+  vpc_id       = module.network.vpc_id
+  subnet_ids   = module.network.private_subnet_ids
+  role_arn     = module.iam.mcp_lambda_base_role_arn
+}
