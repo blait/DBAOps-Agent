@@ -204,7 +204,9 @@ if prompt:
             f"targets: {', '.join(base_request['targets']) or '—'}"
         )
 
-    # 어시스턴트 풍선 — streaming 진행 상황 + 결과
+    # 어시스턴트 결과 영역 — chat_message 컨텍스트 안에서 generator 를 돌리면
+    # streamlit 이 with 블록 종료 후에야 push 하므로 streaming 동안 화면이 비어 보인다.
+    # 따라서 진행은 일반 컨테이너에서 처리하고, 끝난 후에 chat_message 카드로 요약만 다시 그린다.
     turn: dict = {
         "free_text":   prompt,
         "mode":        mode,
@@ -218,20 +220,22 @@ if prompt:
         "fast_context": None,
     }
 
-    with st.chat_message("assistant", avatar="🤖"):
+    live = st.container(border=True)  # 진행 라이브 — chat_message 밖
+    with live:
+        st.markdown("**🤖 분석 진행 중…**")
         t0_total = datetime.now(timezone.utc)
 
         # Fast 단계 (fast 또는 hybrid)
         fast_report: dict = {}
         if mode in ("fast", "hybrid"):
-            st.markdown("**⚡ Fast 분석 중…**")
+            st.markdown("**⚡ Fast 분석**")
             fast_req = {**base_request, "mode": "fast"}
             fast_report = view_fast_stream.render_stream(agentcore_invoke_stream(fast_req)) or {}
             turn["report"] = fast_report
 
         # Swarm 단계 (swarm 또는 hybrid)
         if mode in ("swarm", "hybrid"):
-            st.markdown("**🐝 Swarm 분석 중…**")
+            st.markdown("**🐝 Swarm 분석**")
             swarm_req = {**base_request, "mode": "swarm"}
 
             # fast_context 누적: 이번 턴 fast 결과 + (옵션) 직전 turn 컨텍스트
@@ -244,7 +248,6 @@ if prompt:
                 }
             if use_prev_context:
                 prev = _build_fast_context_from_history()
-                # 두 컨텍스트 병합 (this turn 우선)
                 merged_findings = (ctx.get("findings") or []) + [f for f in (prev.get("findings") or []) if f]
                 merged_hyps = (ctx.get("hypotheses") or []) + [h for h in (prev.get("hypotheses") or []) if h]
                 merged_actions = (ctx.get("next_actions") or []) + [a for a in (prev.get("next_actions") or []) if a]
@@ -264,5 +267,6 @@ if prompt:
         turn["elapsed"] = elapsed
         st.caption(f"⏱ 총 {elapsed:.1f}s")
 
-    # 히스토리에 저장
+    # 히스토리에 저장 — 다음 rerun 에서 chat_message 형태로 자연스럽게 합쳐진다
     st.session_state["history"].append(turn)
+    st.rerun()
