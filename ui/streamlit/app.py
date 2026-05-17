@@ -10,7 +10,7 @@ import streamlit as st
 
 import ecs_client
 from agentcore_client import invoke as agentcore_invoke
-from components import view_dashboard, view_story, view_trace, view_triage
+from components import view_dashboard, view_story, view_swarm, view_trace, view_triage
 from components.request_form import build_request
 
 st.set_page_config(page_title="DBAOps-Agent", layout="wide")
@@ -45,12 +45,13 @@ elapsed = st.session_state.get("last_elapsed")
 
 
 # ───────────────────────────── Tabs ─────────────────────────────
-tab_triage, tab_story, tab_dash, tab_trace, tab_raw, tab_gen = st.tabs(
+tab_triage, tab_story, tab_dash, tab_trace, tab_swarm, tab_raw, tab_gen = st.tabs(
     [
         "🚨 Triage",
         "📖 Incident Story",
         "🗂 Domain Dashboard",
         "🧠 Thought Process",
+        "🐝 Swarm",
         "🧾 Raw",
         "🧪 Generators",
     ]
@@ -94,12 +95,28 @@ with tab_trace:
     if rep is not None:
         view_trace.render(rep)
 
+# Swarm
+with tab_swarm:
+    if not result:
+        st.info("swarm 모드로 분석 실행하면 여기에 핸드오프 시퀀스가 보입니다.")
+    elif "error" in result:
+        st.error(result["error"])
+    elif "swarm" in result:
+        view_swarm.render(result["swarm"], request=st.session_state.get("last_request"))
+    else:
+        st.info("이번 응답은 fast 모드입니다. 사이드바에서 모드를 `swarm` 으로 바꿔 다시 실행해 보세요.")
+
 # Raw
 with tab_raw:
-    rep = _gate_result(tab_raw)
-    if rep is not None:
-        with st.expander("Markdown", expanded=False):
-            st.markdown(rep.get("markdown", "_(empty)_"))
+    if not result:
+        st.info("좌측에서 **분석 실행** 을 눌러 리포트를 받아오세요.")
+    elif "error" in result:
+        st.error(result["error"])
+    else:
+        rep = result.get("report") or {}
+        if rep:
+            with st.expander("Markdown", expanded=False):
+                st.markdown(rep.get("markdown", "_(empty)_"))
         with st.expander("Full JSON response"):
             st.code(json.dumps(result, ensure_ascii=False, indent=2), language="json")
 

@@ -34,8 +34,25 @@ def _get_graph():
 
 def handler(event: dict, context: Any | None = None) -> dict:
     logger.info("invoke: %s", json.dumps(event)[:500])
+    request = event.get("request") or {}
+    mode = (request.get("mode") or "fast").lower()
+
+    if mode == "swarm":
+        # ReAct/swarm 모드 — 도메인 specialist 3 + 자율 핸드오프
+        from .swarm_graph import invoke_swarm
+        try:
+            result = invoke_swarm(
+                request,
+                recursion_limit=int(os.environ.get("SWARM_RECURSION_LIMIT", "30")),
+            )
+            return {"swarm": result, "request": request}
+        except Exception as e:  # noqa: BLE001
+            logger.exception("swarm invoke failed")
+            return {"error": str(e), "request": request}
+
+    # default: fast 모드 — 정해진 LangGraph 흐름
     initial: AnalysisState = {
-        "request": event.get("request", {}),
+        "request": request,
         "raw_signals": {},
         "messages": [],
         "tool_budget": int(os.environ.get("TOOL_BUDGET", "32")),
