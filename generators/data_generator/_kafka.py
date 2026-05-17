@@ -54,3 +54,52 @@ def make_consumer(group_id: str, topics: list[str]):
     c = Consumer(cfg)
     c.subscribe(topics)
     return c
+
+
+def ensure_topic(topic: str, *, num_partitions: int = 3, replication_factor: int = 2,
+                 timeout_sec: float = 30.0) -> bool:
+    """topic 이 없으면 만든다. 이미 있으면 True 반환, 만들면 True, 실패하면 False.
+
+    MSK Serverless 는 auto.create.topics.enable 이 OFF — admin 으로 만들어야 한다.
+    """
+    if not os.environ.get("MSK_BOOTSTRAP"):
+        logger.info("ensure_topic skip — MSK_BOOTSTRAP not set")
+        return False
+
+    try:
+        from confluent_kafka.admin import AdminClient, NewTopic
+    except Exception as e:  # noqa: BLE001
+        logger.warning("kafka admin import failed: %s", e)
+        return False
+
+    cfg = _common_iam_config()
+    cfg["oauth_cb"] = _oauth_cb
+    admin = AdminClient(cfg)
+
+    try:
+        md = admin.list_topics(timeout=timeout_sec)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("admin.list_topics failed: %s", e)
+        return False
+
+    if topic in (md.topics or {}):
+        logger.info("topic %s already exists", topic)
+        return True
+
+    new = NewTopic(topic, num_partitions=num_partitions, replication_factor=replication_factor)
+    futures = admin.create_topics([new], operation_timeout=timeout_sec, request_timeout=timeout_sec)
+    fut = futures.get(topic)
+    if fut is None:
+        return False
+    try:
+        fut.result(timeout=timeout_sec)
+        logger.info("created topic %s (partitions=%d rf=%d)", topic, num_partitions, replication_factor)
+        return True
+    except Exception as e:  # noqa: BLE001
+        # AlreadyExists 류는 성공 취급
+        msg = str(e)
+        if "AlreadyExists" in msg or "TopicExistsException" in msg:
+            logger.info("topic %s already existed (race)", topic)
+            return True
+        logger.warning("create_topic %s failed: %s", topic, e)
+        return False

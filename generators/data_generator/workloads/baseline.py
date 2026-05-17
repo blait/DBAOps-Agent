@@ -12,7 +12,7 @@ import time
 import psycopg
 import pymysql
 
-from .._kafka import make_producer
+from .._kafka import ensure_topic, make_producer
 from .._schema import ensure_mysql_schema, ensure_pg_schema
 from .._secrets import mysql_dsn, pg_dsn
 
@@ -81,6 +81,9 @@ def _kafka_loop(end: float, target_rps: int = 100) -> None:
         logger.info("MSK_BOOTSTRAP not set — skipping kafka baseline")
         return
     topic = os.environ.get("KAFKA_TOPIC", "dbaops.orders")
+    if not ensure_topic(topic):
+        logger.warning("kafka topic '%s' unavailable — skipping kafka baseline", topic)
+        return
     producer = make_producer()
     interval = 1.0 / target_rps
     while not _stop_at(end):

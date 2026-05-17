@@ -13,7 +13,7 @@ import random
 import threading
 import time
 
-from .._kafka import make_consumer, make_producer
+from .._kafka import ensure_topic, make_consumer, make_producer
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,9 @@ def run(duration_sec: int) -> int:
         logger.info("MSK_BOOTSTRAP not set — skipping kafka_isr_shrink")
         return 0
     topic = os.environ.get("KAFKA_TOPIC", "dbaops.orders")
+    if not ensure_topic(topic):
+        logger.warning("kafka topic '%s' unavailable — skipping", topic)
+        return 0
     end = time.time() + duration_sec
     threads = [
         threading.Thread(target=_producer_burst, args=(end, topic), daemon=True),
