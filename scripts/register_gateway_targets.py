@@ -324,11 +324,19 @@ def upsert_runtime_with_auth(
         "GATEWAY_ENDPOINT":      gateway_endpoint,
         "TOOL_BUDGET":           "128",
         "DBAOPS_IGNORE_BUDGET":  "1",
-        "LOG_LEVEL":             "DEBUG",
+        "LOG_LEVEL":             "INFO",
         "COGNITO_TOKEN_URL":     cognito_token_url_value,
         "COGNITO_CLIENT_ID":     cognito_client_id,
         "COGNITO_CLIENT_SECRET": cognito_client_secret,
         "COGNITO_SCOPE":         "dbaops-gateway/invoke",
+        # 인프라 컨텍스트 — os/db plan LLM 이 정확한 CW dimensions 를 만들 때 사용
+        "INFRA_PROM_INSTANCE_ID":  os.environ.get("INFRA_PROM_INSTANCE_ID", ""),
+        "INFRA_AURORA_CLUSTER_ID": "dbaops-poc-aurora-pg",
+        "INFRA_AURORA_WRITER_ID":  "dbaops-poc-aurora-pg-writer",
+        "INFRA_AURORA_READER_ID":  "dbaops-poc-aurora-pg-reader",
+        "INFRA_MYSQL_DB_ID":       "dbaops-poc-mysql",
+        "INFRA_MSK_CLUSTER_NAME":  "dbaops-poc",
+        "INFRA_LOG_BUCKET":        os.environ.get("INFRA_LOG_BUCKET", ""),
     }
 
     if existing:
