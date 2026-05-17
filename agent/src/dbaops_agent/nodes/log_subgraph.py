@@ -52,6 +52,25 @@ def _resolve_bucket(value: str, default_bucket: str) -> str:
     return default_bucket if value == "<DEFAULT_BUCKET>" else value
 
 
+def _expand_keys(bucket: str, key_or_prefix: str, max_keys: int = 20) -> list[str]:
+    """key 가 '/' 로 끝나거나 .gz/.log 가 아니면 prefix 로 보고 list_objects_v2 로 확장."""
+    is_prefix = key_or_prefix.endswith("/") or not (
+        key_or_prefix.endswith(".gz") or key_or_prefix.endswith(".log") or key_or_prefix.endswith(".txt")
+    )
+    if not is_prefix:
+        return [key_or_prefix]
+    try:
+        import boto3
+
+        s3 = boto3.client("s3")
+        resp = s3.list_objects_v2(Bucket=bucket, Prefix=key_or_prefix, MaxKeys=max_keys)
+        keys = [obj["Key"] for obj in (resp.get("Contents") or []) if obj["Key"].endswith((".gz", ".log", ".txt"))]
+        return keys
+    except Exception as e:  # noqa: BLE001
+        logger.warning("list_objects_v2 failed for s3://%s/%s: %s", bucket, key_or_prefix, e)
+        return []
+
+
 def _fetch(state: AnalysisState, sources: list[dict[str, str]]) -> list[dict]:
     import os
 
@@ -65,22 +84,30 @@ def _fetch(state: AnalysisState, sources: list[dict[str, str]]) -> list[dict]:
         if not bucket:
             logger.warning("log source %s skipped — no bucket", s.get("name"))
             continue
-        try:
-            r = client.call(
-                "s3-log-fetch___s3_log_fetch",
-                {
-                    "bucket": bucket,
-                    "key": s["key"],
-                    "regex": s.get("regex"),
-                    "max_lines": int(s.get("max_lines", 5000)),
-                },
-                cache=cache,
-                budget=budget,
-            )
-            lines = (r or {}).get("lines") or []
-            out.append({"name": s["name"], "lines": lines})
-        except Exception as e:  # noqa: BLE001
-            logger.warning("log_fetch %s failed: %s", s.get("name"), e)
+        keys = _expand_keys(bucket, s.get("key", ""))
+        if not keys:
+            logger.warning("log source %s: no s3 keys under %s", s.get("name"), s.get("key"))
+            continue
+        merged_lines: list[str] = []
+        for k in keys[:5]:  # 한 source 당 최대 5개 객체
+            try:
+                r = client.call(
+                    "s3-log-fetch___s3_log_fetch",
+                    {
+                        "bucket": bucket,
+                        "key": k,
+                        "regex": s.get("regex"),
+                        "max_lines": int(s.get("max_lines", 5000)),
+                    },
+                    cache=cache,
+                    budget=budget,
+                )
+                merged_lines.extend((r or {}).get("lines") or [])
+                if len(merged_lines) >= int(s.get("max_lines", 5000)):
+                    break
+            except Exception as e:  # noqa: BLE001
+                logger.warning("log_fetch %s/%s failed: %s", s.get("name"), k, e)
+        out.append({"name": s["name"], "lines": merged_lines})
     state["tool_budget"] = budget[0]
     return out
 

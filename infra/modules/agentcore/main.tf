@@ -130,6 +130,14 @@ resource "aws_iam_role_policy" "runtime" {
           "ecr:BatchGetImage"
         ]
         Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket",
+          "s3:GetObject"
+        ]
+        Resource = "*"
       }
     ]
   })
