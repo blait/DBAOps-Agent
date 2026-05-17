@@ -110,6 +110,10 @@ output "mcp_repo_s3_log_fetch" {
   value = module.lambda_s3_log_fetch.ecr_repository_url
 }
 
+output "mcp_repo_aws_api" {
+  value = module.lambda_aws_api.ecr_repository_url
+}
+
 output "mcp_lambda_arns" {
   value = {
     "prometheus-query"   = module.lambda_prometheus_query.function_arn
@@ -118,5 +122,6 @@ output "mcp_lambda_arns" {
     "sql-readonly"       = module.lambda_sql_readonly.function_arn
     "msk-metrics"        = module.lambda_msk_metrics.function_arn
     "s3-log-fetch"       = module.lambda_s3_log_fetch.function_arn
+    "aws-api"            = module.lambda_aws_api.function_arn
   }
 }

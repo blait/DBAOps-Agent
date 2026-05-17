@@ -195,6 +195,12 @@ module "lambda_msk_metrics" {
   vpc_id       = module.network.vpc_id
   subnet_ids   = module.network.private_subnet_ids
   role_arn     = module.iam.mcp_lambda_base_role_arn
+
+  env_vars = {
+    KAFKA_CLUSTER_NAME  = module.msk_serverless.cluster_name
+    KAFKA_DEFAULT_TOPIC = "dbaops.orders"
+    KAFKA_DEFAULT_CG    = "dbaops-paused"
+  }
 }
 
 module "lambda_s3_log_fetch" {
@@ -204,6 +210,19 @@ module "lambda_s3_log_fetch" {
   tool_name    = "s3-log-fetch"
   image_pushed = var.mcp_images_pushed
   timeout      = 60
+  memory_size  = 512
+  vpc_id       = module.network.vpc_id
+  subnet_ids   = module.network.private_subnet_ids
+  role_arn     = module.iam.mcp_lambda_base_role_arn
+}
+
+module "lambda_aws_api" {
+  source = "../../modules/lambda_mcp_image"
+
+  environment  = var.environment
+  tool_name    = "aws-api"
+  image_pushed = var.mcp_images_pushed
+  timeout      = 30
   memory_size  = 512
   vpc_id       = module.network.vpc_id
   subnet_ids   = module.network.private_subnet_ids

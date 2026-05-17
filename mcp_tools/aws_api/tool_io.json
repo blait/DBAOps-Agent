@@ -1,0 +1,168 @@
+{
+  "tools": [
+    {
+      "name": "describe_rds_instances",
+      "description": "AWS RDS DescribeDBInstances — RDS DB 인스턴스 메타정보(엔진/버전/엔드포인트/storage/PI 활성 여부 등) 조회.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "db_instance_identifier": {"type": "string", "description": "특정 인스턴스 id(예: dbaops-poc-mysql). 비우면 전체."},
+          "max_records":            {"type": "integer", "description": "20~100"}
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "db_instances": {"type": "array"},
+          "count":        {"type": "integer"}
+        }
+      }
+    },
+    {
+      "name": "describe_rds_clusters",
+      "description": "AWS RDS DescribeDBClusters — Aurora 클러스터/멤버(쓰기/리더/promotion_tier) 조회.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "db_cluster_identifier": {"type": "string", "description": "특정 클러스터 id(비우면 전체)."}
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "db_clusters": {"type": "array"},
+          "count":       {"type": "integer"}
+        }
+      }
+    },
+    {
+      "name": "describe_db_log_files",
+      "description": "AWS RDS DescribeDBLogFiles — RDS 인스턴스에 적재된 DB 엔진 로그 파일 목록(파일명/크기/마지막 갱신).",
+      "input_schema": {
+        "type": "object",
+        "required": ["db_instance_identifier"],
+        "properties": {
+          "db_instance_identifier": {"type": "string"},
+          "filename_contains":      {"type": "string", "description": "예: 'error', 'slowquery', 'audit'"}
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "log_files": {"type": "array"}
+        }
+      }
+    },
+    {
+      "name": "download_db_log_file_portion",
+      "description": "AWS RDS DownloadDBLogFilePortion — RDS 엔진 로그 파일에서 마지막 N 라인을 가져온다(MySQL slow/error, PG postgresql.log 등). marker 없이 호출하면 자동으로 끝까지 페이지를 돌며 누적. regex 가 있으면 매칭 라인만.",
+      "input_schema": {
+        "type": "object",
+        "required": ["db_instance_identifier", "log_file_name"],
+        "properties": {
+          "db_instance_identifier": {"type": "string"},
+          "log_file_name":          {"type": "string", "description": "describe_db_log_files 결과의 log_filename"},
+          "marker":                 {"type": "string", "description": "이어 받을 marker(생략 시 끝까지 자동 페이징)"},
+          "regex":                  {"type": "string", "description": "예: 'still waiting|deadlock', 'Query Text:|duration:' (slow query)"},
+          "lines":                  {"type": "integer", "description": "마지막 N 라인 (기본 200, 최대 1000)"}
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "lines":  {"type": "array"},
+          "marker": {"type": "string"}
+        }
+      }
+    },
+    {
+      "name": "list_msk_clusters",
+      "description": "AWS Kafka(MSK) ListClustersV2 — MSK Provisioned/Serverless 클러스터 목록.",
+      "input_schema": {"type": "object", "properties": {}},
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "clusters": {"type": "array"},
+          "count":    {"type": "integer"}
+        }
+      }
+    },
+    {
+      "name": "describe_ec2_instances",
+      "description": "AWS EC2 DescribeInstances — EC2 인스턴스 상태/타입/AZ/Name 태그 조회.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "instance_ids":      {"type": "array", "items": {"type": "string"}, "description": "i-xxxx... 목록"},
+          "tag_name_contains": {"type": "string", "description": "Name 태그 포함어 검색"},
+          "max":               {"type": "integer", "description": "기본 50, 최대 100"}
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "instances": {"type": "array"},
+          "count":     {"type": "integer"}
+        }
+      }
+    },
+    {
+      "name": "list_cloudwatch_alarms",
+      "description": "AWS CloudWatch DescribeAlarms — 메트릭 알람 목록(상태/메트릭/임계값/마지막 변경).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "state_value":       {"type": "string", "description": "OK / ALARM / INSUFFICIENT_DATA"},
+          "alarm_name_prefix": {"type": "string"},
+          "max":               {"type": "integer", "description": "기본 50, 최대 100"}
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "alarms": {"type": "array"}
+        }
+      }
+    },
+    {
+      "name": "list_metric_namespaces",
+      "description": "AWS CloudWatch ListMetrics — 계정/리전의 namespace 와 메트릭 이름 빠른 탐색(존재 여부 확인용).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "namespace":     {"type": "string", "description": "예: AWS/RDS, AWS/EC2"},
+          "metric_prefix": {"type": "string"}
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "namespaces": {"type": "array"},
+          "metrics":    {"type": "array"}
+        }
+      }
+    },
+    {
+      "name": "describe_pi_dimensions",
+      "description": "AWS Performance Insights DescribeDimensionKeys — RDS PI 의 그룹별 top dimension(SQL/wait_event/host 등) 조회.",
+      "input_schema": {
+        "type": "object",
+        "required": ["dbi_resource_id"],
+        "properties": {
+          "dbi_resource_id": {"type": "string", "description": "RDS DbiResourceId(예: db-XXXXXXXX)"},
+          "metric":          {"type": "string", "description": "예: db.load.avg"},
+          "group_by":        {"type": "string", "description": "PI group prefix: db.sql_tokenized | db.wait_event | db.host | db.user (default: db.sql_tokenized)"},
+          "start":           {"type": "string"},
+          "end":             {"type": "string"}
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "metric": {"type": "string"},
+          "keys":   {"type": "array"}
+        }
+      }
+    }
+  ]
+}
