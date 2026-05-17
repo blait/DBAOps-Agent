@@ -283,7 +283,22 @@ _TOOL_TARGETS = [
     ("sql-readonly",       "sql_readonly/tool_io.json",       "sql-readonly"),
     ("msk-metrics",        "msk_metrics/tool_io.json",        "msk-metrics"),
     ("s3-log-fetch",       "s3_log_fetch/tool_io.json",       "s3-log-fetch"),
+    ("aws-api",            "aws_api/tool_io.json",            "aws-api"),
 ]
+
+
+def load_tool_specs(spec_path: Path) -> list[dict]:
+    """tool_io.json 파일을 읽어 tool 정의 리스트를 반환.
+    파일 형식 두 가지를 지원:
+      1) 단일 도구: {"name": ..., "input_schema": ..., "output_schema": ...}
+      2) 다중 도구: {"tools": [{...}, {...}]}
+    """
+    raw = json.loads(spec_path.read_text())
+    if isinstance(raw, dict) and isinstance(raw.get("tools"), list):
+        return [schema_to_tool_def(t) for t in raw["tools"]]
+    if isinstance(raw, dict) and "name" in raw:
+        return [schema_to_tool_def(raw)]
+    raise ValueError(f"unsupported tool_io.json format: {spec_path}")
 
 
 def get_cognito_client_secret(user_pool_id: str, client_id: str) -> str:
@@ -304,6 +319,8 @@ def upsert_runtime_with_auth(
     cognito_token_url_value: str,
     cognito_client_id: str,
     cognito_client_secret: str,
+    log_bucket: str = "",
+    prom_endpoint: str = "",
 ) -> dict | None:
     image_uri = f"{ecr_uri}:latest"
     cfg = {"containerConfiguration": {"containerUri": image_uri}}
@@ -336,7 +353,7 @@ def upsert_runtime_with_auth(
         "INFRA_AURORA_READER_ID":  "dbaops-poc-aurora-pg-reader",
         "INFRA_MYSQL_DB_ID":       "dbaops-poc-mysql",
         "INFRA_MSK_CLUSTER_NAME":  "dbaops-poc",
-        "INFRA_LOG_BUCKET":        os.environ.get("INFRA_LOG_BUCKET", ""),
+        "INFRA_LOG_BUCKET":        log_bucket or os.environ.get("INFRA_LOG_BUCKET", ""),
     }
 
     if existing:
@@ -390,13 +407,13 @@ def main(argv: list[str]) -> int:
             if not arn:
                 logger.warning("lambda for %s not in tf outputs (mcp_lambda_arns) — skipping", target_name)
                 continue
-            spec = json.loads(spec_path.read_text())
+            tools = load_tool_specs(spec_path)
             upsert_target(
                 ac,
                 gw_id,
                 target_name=target_name,
                 lambda_arn=arn,
-                tools=[schema_to_tool_def(spec)],
+                tools=tools,
             )
 
     if args.skip_runtime:
@@ -412,6 +429,8 @@ def main(argv: list[str]) -> int:
                 cognito_token_url(domain),
                 app_client_id,
                 client_secret,
+                log_bucket=outputs.get("logs_bucket", "") or "",
+                prom_endpoint=outputs.get("prometheus_endpoint", "") or "",
             )
         except ClientError as e:
             logger.error("agent runtime upsert failed: %s", e)
