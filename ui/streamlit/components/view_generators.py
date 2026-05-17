@@ -28,6 +28,22 @@ def _status_chip(status: str | None) -> str:
     return f"{_STATUS_BADGE.get(status, '•')} `{status}`"
 
 
+def _scenario_for_family(family: str | None) -> dict | None:
+    if not family:
+        return None
+    return next((s for s in ecs_client.SCENARIOS if s.get("task_def") == family), None)
+
+
+def _scenario_title(family: str | None) -> str:
+    """ECS task family → 시나리오 카드 title (없으면 family 그대로)."""
+    sc = _scenario_for_family(family)
+    if not sc:
+        return family or "(unknown)"
+    icon = sc.get("icon")
+    title = sc.get("title") or family
+    return f"{icon} {title}" if icon else title
+
+
 def _refresh_log_window(group: str, stream: str, key: str, max_lines: int = 300) -> None:
     """session_state 의 log buffer 를 업데이트하고 화면에 그린다."""
     state_key = f"loglines:{key}"
@@ -69,10 +85,11 @@ def _render_task_card(task_id: str) -> None:
     family = info.get("family")
     stopped_reason = info.get("stopped_reason")
 
+    title = _scenario_title(family)
     with st.container(border=True):
         cols = st.columns([2, 1, 1, 1])
-        cols[0].markdown(f"### {family}")
-        cols[0].caption(f"task `{task_id[:12]}…`")
+        cols[0].markdown(f"### {title}")
+        cols[0].caption(f"`{family}` · task `{task_id[:12]}…`")
         cols[1].metric("task", _status_chip(status), label_visibility="collapsed")
         cols[1].caption("task")
         cols[2].metric("container", _status_chip(container), label_visibility="collapsed")
@@ -287,6 +304,8 @@ def render(autorefresh_sec: int = 5) -> None:
         running = []
     others = [r for r in running if r.get("task_id") not in set(tracked)]
     if others:
+        for r in others:
+            r["scenario"] = _scenario_title(r.get("family"))
         st.dataframe(others, use_container_width=True, hide_index=True)
         st.caption("👆 위 목록의 task_id 를 복사해 위 expander 로 추적할 수 있습니다.")
     else:

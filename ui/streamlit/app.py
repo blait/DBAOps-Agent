@@ -47,7 +47,7 @@ with st.sidebar:
         index=0,
         horizontal=False,
     )
-    lens = st.selectbox("lens", ["multi", "os", "db", "log", "query"], index=0)
+    lens = st.selectbox("lens", ["multi", "os", "db", "log", "query", "aws"], index=0)
     now = datetime.now(timezone.utc)
     default_start = now - timedelta(hours=1)
     start = st.text_input("Start (UTC)", default_start.isoformat(timespec="seconds"))
