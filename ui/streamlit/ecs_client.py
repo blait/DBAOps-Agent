@@ -11,46 +11,146 @@ import boto3
 REGION = os.environ.get("AWS_REGION", "ap-northeast-2")
 CLUSTER = os.environ.get("ECS_CLUSTER", "dbaops-poc")
 
-# 사이드바 트리거 버튼 정의 — task definition + 기본 환경
+# 시나리오 카탈로그 — UI 카드 + ECS RunTask 양쪽에 동일 사용.
+# 각 항목 키:
+#   key:       내부 식별자
+#   category:  "data" (실제 부하) / "log" (로그 burst)
+#   icon, title, summary, impact, signals, suggested_lens, suggested_prompt — UI 카드용
+#   label, task_def, duration, env — RunTask 호출용
 SCENARIOS: list[dict[str, Any]] = [
     {
         "key": "data-baseline",
-        "label": "Baseline 트래픽 (60초)",
+        "category": "data",
+        "icon": "🌊",
+        "title": "정상 트래픽 (Baseline)",
+        "summary": "PG 50 TPS / MySQL 30 QPS / Kafka 100 msg/s 가벼운 정상 트래픽을 60초간 발생시킵니다. 비교 베이스라인용.",
+        "impact": [
+            "PG: dbaops_orders INSERT/SELECT, dbaops_hot_counter UPDATE",
+            "MySQL: dbaops_orders INSERT/SELECT",
+            "Kafka: dbaops.orders topic 으로 producer 메시지",
+        ],
+        "signals": [
+            "AWS/RDS DatabaseConnections 살짝 증가",
+            "Aurora pg_stat_database 의 xact_commit 증가",
+            "MSK BytesInPerSec 약 100 msg/s",
+        ],
+        "suggested_lens": "multi",
+        "suggested_prompt": "최근 1시간 호스트와 DB 양쪽의 베이스라인 트래픽이 어떤지 요약해줘.",
+        "label": "🌊 Baseline 트래픽 (60초)",
         "task_def": "dbaops-poc-data-baseline",
         "duration": 60,
         "env": [],
     },
     {
         "key": "data-lock-contention",
-        "label": "PG 락 경합 (3분)",
+        "category": "data",
+        "icon": "🔒",
+        "title": "PG 락 경합 (lock contention)",
+        "summary": "8 worker 가 PG dbaops_hot_counter (1행 테이블)에 동시에 SELECT FOR UPDATE → row-level lock 직렬화. 3분.",
+        "impact": [
+            "pg_stat_activity 에 wait_event=Lock/transactionid·tuple 다수",
+            "트랜잭션이 'idle in transaction' 상태로 락 보유",
+            "처리량(throughput) 직렬화로 급락",
+        ],
+        "signals": [
+            "pg_locks 의 not granted 행 증가",
+            "RDS Performance Insights 의 Lock wait 비중 급등",
+            "Aurora CPU 가 connection 수 대비 비정상 상승",
+        ],
+        "suggested_lens": "db",
+        "suggested_prompt": "Aurora 락 경합이 의심된다. 활성 세션과 hot row 락 / 보유자를 분석해줘.",
+        "label": "🔒 PG 락 경합 (3분)",
         "task_def": "dbaops-poc-data-lock-contention",
         "duration": 180,
         "env": [],
     },
     {
         "key": "data-slow-query",
-        "label": "MySQL 슬로우 쿼리 (2분)",
+        "category": "data",
+        "icon": "🐢",
+        "title": "MySQL 슬로우 쿼리 (full scan)",
+        "summary": "MySQL dbaops_orders.user_id 에 인덱스가 없어 30만 행 풀스캔이 반복됩니다. 2분.",
+        "impact": [
+            "MySQL CPUUtilization 30% 지속",
+            "EXPLAIN: type=ALL, possible_keys=NULL, rows ≈ 308K",
+            "performance_schema digests 가 OFF 상태에서도 slow log 에 기록",
+        ],
+        "signals": [
+            "RDS SlowQuery 로그 burst",
+            "AWS/RDS ReadIOPS 증가",
+            "ConnectionCount 는 적은데 CPU 만 상승",
+        ],
+        "suggested_lens": "db",
+        "suggested_prompt": "MySQL 의 슬로우 쿼리와 인덱스 상태를 점검하고 EXPLAIN 으로 비효율 지점을 찾아줘.",
+        "label": "🐢 MySQL 슬로우 쿼리 (2분)",
         "task_def": "dbaops-poc-data-slow-query",
         "duration": 120,
         "env": [],
     },
     {
         "key": "data-connection-spike",
-        "label": "PG 연결 스파이크 (90초)",
+        "category": "data",
+        "icon": "🌪",
+        "title": "PG 연결 스파이크 (connection burst)",
+        "summary": "10초 동안 PG 에 200개의 짧은 connection burst. 90초 task.",
+        "impact": [
+            "DatabaseConnections 메트릭 일시 폭등",
+            "PG max_connections 근접 가능 (FATAL: too many connections 위험)",
+            "각 connection 이 짧아 connect/disconnect overhead 부담",
+        ],
+        "signals": [
+            "AWS/RDS DatabaseConnections 스파이크",
+            "node_exporter network_receive_bps 단발 상승",
+            "PG 로그에 connection authorized 라인 burst",
+        ],
+        "suggested_lens": "multi",
+        "suggested_prompt": "PG 연결 수 폭증이 의심된다. 호스트 네트워크와 DB 연결 양쪽을 같이 분석해줘.",
+        "label": "🌪 PG 연결 스파이크 (90초)",
         "task_def": "dbaops-poc-data-connection-spike",
         "duration": 90,
         "env": [],
     },
     {
         "key": "data-kafka-isr-shrink",
-        "label": "Kafka ISR shrink (60초)",
+        "category": "data",
+        "icon": "🌀",
+        "title": "Kafka 컨슈머 lag (paused consumer)",
+        "summary": "producer 가 5000 batch 를 한꺼번에 밀고 consumer 는 paused → ConsumerLag 누적. 60초.",
+        "impact": [
+            "MSK BytesInPerSec 급등 후 BytesOutPerSec 가 따라가지 못함",
+            "MaxOffsetLag (consumer lag) 누적",
+            "MSK Serverless 는 ISR 메트릭 노출 제한 — lag 메트릭 위주로 관찰",
+        ],
+        "signals": [
+            "AWS/Kafka MaxOffsetLag 증가",
+            "BytesIn vs BytesOut 격차 확대",
+            "consumer group dbaops-paused 의 offset 정체",
+        ],
+        "suggested_lens": "db",
+        "suggested_prompt": "Kafka consumer lag 이 누적되고 있다. lag 추세와 BytesIn/Out 격차를 분석해줘.",
+        "label": "🌀 Kafka 컨슈머 lag (60초)",
         "task_def": "dbaops-poc-data-kafka-isr-shrink",
         "duration": 60,
         "env": [],
     },
     {
         "key": "log-postgres-burst",
-        "label": "PG 에러 로그 burst (3분, 50 line/s)",
+        "category": "log",
+        "icon": "📕",
+        "title": "PG 에러 로그 burst",
+        "summary": "deadlock detected / FATAL: too many connections / waits-for 라인을 50/s 로 3분간 S3 logs-burst/postgres/ 에 적재.",
+        "impact": [
+            "S3 logs-burst/postgres/ 경로에 .log.gz 파일 누적",
+            "agent 의 log_specialist / s3_log_fetch 가 정규식으로 패턴 검출",
+            "deadlock 387 + FATAL 388 등 빈도 카운트 (실측)",
+        ],
+        "signals": [
+            "S3 ListObjects 결과 logs-burst/postgres/ 아래 객체 수 급증",
+            "Drain3 분류: 'ERROR: deadlock detected' / 'FATAL: too many connections' 템플릿이 빈도 1위",
+        ],
+        "suggested_lens": "log",
+        "suggested_prompt": "최근 PG 에러 로그가 폭증했다. S3 logs-burst/postgres/ 아래 .log.gz 들을 deadlock / FATAL 패턴으로 분석해줘.",
+        "label": "📕 PG 에러 로그 burst (3분)",
         "task_def": "dbaops-poc-log-postgres",
         "duration": 180,
         "env": [
@@ -61,7 +161,21 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "key": "log-mysql-burst",
-        "label": "MySQL 에러 로그 burst (3분, 50 line/s)",
+        "category": "log",
+        "icon": "📘",
+        "title": "MySQL 에러 로그 burst",
+        "summary": "[ERROR] InnoDB / [MY-013183] / Query_time 큰 slow 라인을 50/s 로 3분간 S3 logs-burst/mysql/ 에 적재.",
+        "impact": [
+            "S3 logs-burst/mysql/ 경로에 객체 누적",
+            "agent 의 log_specialist 가 InnoDB 에러 / slow query 패턴 분류",
+        ],
+        "signals": [
+            "Drain3 분류: '[ERROR] InnoDB ...' 템플릿 빈도",
+            "Query_time / Lock_time 분포",
+        ],
+        "suggested_lens": "log",
+        "suggested_prompt": "MySQL 에러 로그가 갑자기 늘었다. InnoDB 어설션·slow query 패턴을 분류해 RCA 후보를 알려줘.",
+        "label": "📘 MySQL 에러 로그 burst (3분)",
         "task_def": "dbaops-poc-log-mysql",
         "duration": 180,
         "env": [
@@ -72,7 +186,21 @@ SCENARIOS: list[dict[str, Any]] = [
     },
     {
         "key": "log-kafka-burst",
-        "label": "Kafka 에러 로그 burst (3분, 50 line/s)",
+        "category": "log",
+        "icon": "📗",
+        "title": "Kafka 에러 로그 burst",
+        "summary": "Shrinking ISR / Could not append / connect task failure 라인을 50/s 로 3분간 S3 logs-burst/kafka/ 에 적재.",
+        "impact": [
+            "S3 logs-burst/kafka/ 경로에 server.log/connect.log 모사 객체 누적",
+            "agent 의 log_specialist 가 ISR shrink / Connect task fail 패턴 분류",
+        ],
+        "signals": [
+            "Drain3 분류: 'Shrinking ISR for partition ...' 템플릿",
+            "WARN/ERROR 비중 집계",
+        ],
+        "suggested_lens": "log",
+        "suggested_prompt": "Kafka 에러 로그가 burst 되고 있다. ISR shrink / Connect task fail 패턴 빈도를 분석해줘.",
+        "label": "📗 Kafka 에러 로그 burst (3분)",
         "task_def": "dbaops-poc-log-kafka",
         "duration": 180,
         "env": [

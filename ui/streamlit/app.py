@@ -161,6 +161,17 @@ with tab_chat:
                         "time_range": {"start": turn.get("start"), "end": turn.get("end")},
                     })
 
+    # 시나리오 카드의 "💬 채팅에 보내기" 가 채워둔 prefill 이 있으면 보여 주기
+    prefill = st.session_state.pop("chat_prefill", None)
+    if prefill:
+        st.info(
+            f"📋 시나리오에서 가져온 추천 prompt 가 준비됐습니다 (lens=`{prefill.get('lens','?')}`).  \n"
+            f"`{prefill.get('free_text','')}`  \n"
+            f"채팅 입력창에 붙여 넣고 Enter 만 치면 분석이 시작됩니다."
+        )
+        # session_state 에 한 번 더 보존 — 사용자가 즉시 누를 수 있도록
+        st.session_state["chat_prefill_pending"] = prefill
+
     prompt = st.chat_input("분석할 자연어 요청을 입력하세요 (예: Aurora 락 경합 분석)")
 
     if prompt:
@@ -168,9 +179,15 @@ with tab_chat:
             st.warning("AGENTCORE_RUNTIME_ARN 이 비어있어 호출할 수 없습니다.")
             st.stop()
 
+        # 추천 prompt 사용 시 lens override (사용자가 직접 바꿨을 수도 있어 저장된 prefill 의 lens 가 우선)
+        active_lens = lens
+        pending = st.session_state.pop("chat_prefill_pending", None)
+        if pending and pending.get("free_text") == prompt and pending.get("lens"):
+            active_lens = pending["lens"]
+
         base_request: dict = {
             "mode": mode,
-            "lens": lens,
+            "lens": active_lens,
             "time_range": {"start": start, "end": end},
             "targets": [t.strip() for t in targets.split(",") if t.strip()],
             "free_text": prompt,
@@ -180,7 +197,7 @@ with tab_chat:
         with st.chat_message("user", avatar="🙋"):
             st.markdown(prompt)
             st.caption(
-                f"mode=`{mode}` · lens=`{lens}` · "
+                f"mode=`{mode}` · lens=`{active_lens}` · "
                 f"window {start[:19]} → {end[:19]} · "
                 f"targets: {', '.join(base_request['targets']) or '—'}"
             )
@@ -188,7 +205,7 @@ with tab_chat:
         turn: dict = {
             "free_text":   prompt,
             "mode":        mode,
-            "lens":        lens,
+            "lens":        active_lens,
             "start":       start,
             "end":         end,
             "targets":     base_request["targets"],

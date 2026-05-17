@@ -117,42 +117,126 @@ def _render_task_card(task_id: str) -> None:
             st.caption("로그 stream 정보 없음 (task definition logConfiguration 확인).")
 
 
+_CATEGORY_LABEL = {
+    "data": ("⚡ 데이터 부하 시나리오", "PG / MySQL / Kafka 에 직접 부하를 주입합니다."),
+    "log":  ("📒 로그 burst 시나리오",  "S3 에 의도된 패턴의 에러/슬로우 로그를 빠르게 적재합니다."),
+}
+
+
+def _render_scenario_card(sc: dict, *, subnets: list[str], sgs: list[str]) -> None:
+    """단일 시나리오 카드 — 설명 + 영향 + 신호 + 추천 prompt + 실행 버튼."""
+    with st.container(border=True):
+        # 헤더
+        head = st.columns([6, 2])
+        head[0].markdown(f"### {sc.get('icon','▶')} {sc.get('title') or sc['label']}")
+        head[1].caption(
+            f"⏱ `{sc.get('duration', '?')}s` · "
+            f"task `{(sc.get('task_def') or '').rsplit('-',1)[-1] or '?'}`"
+        )
+
+        # 한 줄 요약
+        summary = sc.get("summary")
+        if summary:
+            st.markdown(summary)
+
+        # 영향 / 감지 신호
+        cols = st.columns(2)
+        impact = sc.get("impact") or []
+        signals = sc.get("signals") or []
+        with cols[0]:
+            st.markdown("**🎯 영향 (실제 발생 사항)**")
+            if impact:
+                for it in impact:
+                    st.markdown(f"- {it}")
+            else:
+                st.caption("—")
+        with cols[1]:
+            st.markdown("**📡 감지 신호 (메트릭/로그)**")
+            if signals:
+                for it in signals:
+                    st.markdown(f"- {it}")
+            else:
+                st.caption("—")
+
+        # 추천 분석 prompt
+        prompt = sc.get("suggested_prompt")
+        lens = sc.get("suggested_lens") or "multi"
+        if prompt:
+            st.markdown(f"**💬 추천 분석 요청** · lens=`{lens}`")
+            st.code(prompt, language="text")
+
+        # 액션 버튼
+        btn_cols = st.columns([1, 1, 4])
+        with btn_cols[0]:
+            run_clicked = st.button(
+                "▶ 시나리오 실행",
+                key=f"scn-run-{sc['key']}",
+                type="primary",
+                use_container_width=True,
+                disabled=not subnets,
+            )
+        with btn_cols[1]:
+            ask_clicked = st.button(
+                "💬 채팅에 보내기",
+                key=f"scn-ask-{sc['key']}",
+                use_container_width=True,
+                disabled=not prompt,
+                help="추천 prompt를 분석 채팅 탭에 prefill 하고 즉시 실행 가능한 상태로 둡니다.",
+            )
+
+        if run_clicked:
+            try:
+                res = ecs_client.trigger_scenario(
+                    sc["key"], subnets=subnets, security_groups=sgs or None
+                )
+                if res.get("ok"):
+                    tasks = st.session_state.get("tracked_tasks") or []
+                    if res["task_id"] not in tasks:
+                        tasks.append(res["task_id"])
+                        st.session_state["tracked_tasks"] = tasks
+                    st.toast(
+                        f"started {res['family']} · task {res['task_id'][:10]}",
+                        icon="▶",
+                    )
+                    st.rerun()
+                else:
+                    st.error(f"failed: {res.get('failures')}")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"RunTask error: {e}")
+
+        if ask_clicked and prompt:
+            st.session_state["chat_prefill"] = {
+                "free_text": prompt,
+                "lens": lens,
+            }
+            st.toast("분석 채팅 탭의 입력창에 prefill 했습니다.", icon="💬")
+
+
 def _render_trigger_panel() -> None:
-    """시나리오 트리거 버튼 패널 — Generators 탭 안에 배치."""
+    """시나리오 카드 그리드 — Generators 탭 상단."""
     subnets = ecs_client.default_subnets()
     sgs = ecs_client.default_security_groups()
     if not subnets:
-        st.warning("ECS_SUBNETS 환경변수 비어있음. 트리거가 비활성화됩니다.")
+        st.warning("ECS_SUBNETS 환경변수 비어있음. 시나리오 실행이 비활성화됩니다.")
 
-    st.markdown("#### ▶ 시나리오 트리거")
-    st.caption(
-        "버튼 클릭 시 ECS Fargate Spot 으로 task 1개를 즉시 띄우고, "
-        "아래 라이브 모니터에 자동 등록됩니다."
-    )
-    cols = st.columns(2)
-    for i, sc in enumerate(ecs_client.SCENARIOS):
-        with cols[i % 2]:
-            if st.button(sc["label"], key=f"scn-{sc['key']}",
-                         use_container_width=True, disabled=not subnets):
-                try:
-                    res = ecs_client.trigger_scenario(
-                        sc["key"], subnets=subnets, security_groups=sgs or None
-                    )
-                    if res.get("ok"):
-                        # 자동 추적 등록
-                        tasks = st.session_state.get("tracked_tasks") or []
-                        if res["task_id"] not in tasks:
-                            tasks.append(res["task_id"])
-                            st.session_state["tracked_tasks"] = tasks
-                        st.toast(
-                            f"started {res['family']} · task {res['task_id'][:10]}",
-                            icon="▶",
-                        )
-                        st.rerun()
-                    else:
-                        st.error(f"failed: {res.get('failures')}")
-                except Exception as e:  # noqa: BLE001
-                    st.error(f"RunTask error: {e}")
+    # 카테고리별 그룹핑
+    by_cat: dict[str, list[dict]] = {}
+    for sc in ecs_client.SCENARIOS:
+        by_cat.setdefault(sc.get("category", "data"), []).append(sc)
+
+    for cat in ("data", "log"):
+        items = by_cat.get(cat) or []
+        if not items:
+            continue
+        title, hint = _CATEGORY_LABEL.get(cat, (cat, ""))
+        st.markdown(f"### {title}")
+        if hint:
+            st.caption(hint)
+        # 2열 grid
+        cols = st.columns(2)
+        for i, sc in enumerate(items):
+            with cols[i % 2]:
+                _render_scenario_card(sc, subnets=subnets, sgs=sgs)
 
 
 def render(autorefresh_sec: int = 5) -> None:
