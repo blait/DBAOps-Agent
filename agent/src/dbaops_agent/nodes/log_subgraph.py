@@ -16,19 +16,30 @@ from ._common import llm_json, time_range, trace, utc_iso
 logger = logging.getLogger(__name__)
 
 _PLAN_SYSTEM = """\
-You plan log fetches across PG / MySQL / Kafka log buckets.
-Output ONLY a JSON object:
-{"sources": [{"name": str, "bucket": str, "key": str, "regex": str|null}, ...]}
-Use `<DEFAULT_BUCKET>` literal if you do not know the bucket name; the host will substitute.
-3-5 sources max. No prose, no code fences.
+당신은 PG / MySQL / Kafka 로그 분석가입니다. 사용자 요청에 맞춰
+어떤 S3 버킷·키·정규식으로 로그를 가져올지 계획합니다.
+
+출력은 JSON 한 객체:
+{
+  "reasoning": "사용자 요청에서 X 가 의심되어 Y 로그 소스에서 Z 패턴을 보겠다 — 한국어 1~2 문장",
+  "sources": [{"name": str, "bucket": str, "key": str, "regex": str|null}, ...]
+}
+- bucket 이 모르면 `<DEFAULT_BUCKET>` 리터럴 사용 (host 가 치환).
+- 최대 5 source. JSON 외 prose 금지.
 """
 
 _RCA_SYSTEM = """\
-You produce concise log RCA findings in Korean. Input is a JSON array
-[{"source": str, "templates": [{"template": str, "count": int}, ...]}, ...].
-Output ONLY a JSON array:
-[{"title": str, "severity": "info"|"warn"|"error", "evidence": [...], "next_actions": [...]}, ...].
-Highlight bursts and likely causal templates. No prose, no code fences.
+당신은 로그 RCA 분석가입니다. 입력은 source 별 Drain3 템플릿 + 빈도 집계.
+실제 템플릿 문자열과 빈도 수치를 인용하면서 RCA 가설로 이어지는 추론을 보여 줍니다.
+
+출력은 JSON 한 객체:
+{
+  "reasoning": "PG error 에 deadlock 패턴이 N건 burst 되었고 직전에 lock timeout 이 ... — 한국어 2~3 문장",
+  "findings": [
+    {"title": str, "severity": "info"|"warn"|"error", "evidence": [...], "next_actions": [str, ...]}, ...
+  ]
+}
+JSON 외 금지.
 """
 
 _DEFAULT_SOURCES = [
@@ -38,16 +49,23 @@ _DEFAULT_SOURCES = [
 ]
 
 
-def _plan(state: AnalysisState) -> list[dict[str, str]]:
+def _plan(state: AnalysisState) -> tuple[list[dict[str, str]], str]:
     req = state.get("request") or {}
     user = (
         f"time_range={req.get('time_range')}\n"
         f"targets={req.get('targets')}\n"
         f"free_text={req.get('free_text')}"
     )
-    obj = llm_json(_PLAN_SYSTEM, user, default={"sources": _DEFAULT_SOURCES})
-    sources = (obj or {}).get("sources") if isinstance(obj, dict) else None
-    return sources or _DEFAULT_SOURCES
+    default = {
+        "reasoning": "기본 PG/MySQL/Kafka 로그 소스 셋을 폴백으로 조회합니다.",
+        "sources": _DEFAULT_SOURCES,
+    }
+    obj = llm_json(_PLAN_SYSTEM, user, default=default)
+    if not isinstance(obj, dict):
+        obj = default
+    sources = obj.get("sources") or _DEFAULT_SOURCES
+    reasoning = obj.get("reasoning") or default["reasoning"]
+    return sources, reasoning
 
 
 def _resolve_bucket(value: str, default_bucket: str) -> str:
@@ -127,10 +145,10 @@ def _classify(fetched: list[dict]) -> list[dict[str, Any]]:
     return out
 
 
-def _rca(classified: list[dict]) -> list[Finding]:
+def _rca(classified: list[dict]) -> tuple[list[Finding], str]:
     if not any(c["templates"] for c in classified):
-        return []
-    fallback = [
+        return [], "수집된 로그 라인이 없어 RCA 추론을 건너뛰었습니다."
+    fb_findings = [
         {
             "title": f"{c['source']} top template: {c['templates'][0]['template'][:80]}",
             "severity": "warn",
@@ -140,9 +158,17 @@ def _rca(classified: list[dict]) -> list[Finding]:
         for c in classified
         if c["templates"]
     ]
-    items = llm_json(_RCA_SYSTEM, str(classified), default=fallback) or fallback
+    fallback = {
+        "reasoning": "LLM RCA 실패로, source 별 최상위 템플릿만 fallback finding 으로 발화했습니다.",
+        "findings": fb_findings,
+    }
+    obj = llm_json(_RCA_SYSTEM, str(classified), default=fallback)
+    if not isinstance(obj, dict):
+        obj = fallback
+    items = obj.get("findings") or fb_findings
+    reasoning = obj.get("reasoning") or fallback["reasoning"]
     if not isinstance(items, list):
-        items = fallback
+        items = fb_findings
 
     findings: list[Finding] = []
     for it in items:
@@ -161,33 +187,59 @@ def _rca(classified: list[dict]) -> list[Finding]:
                 "timestamp": utc_iso(0),
             }
         )
-    return findings
+    return findings, reasoning
 
 
 def run(state: AnalysisState) -> AnalysisState:
     events: list[dict] = [trace("log_subgraph", "enter", phase="enter")]
 
     t0 = time.time()
-    sources = _plan(state)
-    events.append(trace("log.plan", f"sources={len(sources)}",
-                        detail={"names": [s.get("name") for s in sources]},
-                        duration_ms=int((time.time()-t0)*1000)))
+    sources, plan_reasoning = _plan(state)
+    events.append(trace(
+        "log.plan",
+        f"sources={len(sources)}",
+        phase="thought",
+        reasoning=plan_reasoning,
+        detail={"names": [s.get("name") for s in sources]},
+        duration_ms=int((time.time() - t0) * 1000),
+    ))
 
     t0 = time.time()
     fetched = _fetch(state, sources)
     total_lines = sum(len(s.get("lines") or []) for s in fetched)
-    events.append(trace("log.fetch", f"sources={len(fetched)} total_lines={total_lines}",
-                        duration_ms=int((time.time()-t0)*1000)))
+    fetch_reasoning = (
+        f"MCP `s3-log-fetch___s3_log_fetch` 로 {len(sources)} source 의 객체를 받아 "
+        f"총 {total_lines} 줄을 수집했습니다 (regex 적용). 빈 source 는 prefix 매칭 실패 가능."
+    )
+    events.append(trace(
+        "log.fetch",
+        f"sources={len(fetched)} total_lines={total_lines}",
+        phase="thought",
+        reasoning=fetch_reasoning,
+        duration_ms=int((time.time() - t0) * 1000),
+    ))
 
     t0 = time.time()
     classified = _classify(fetched)
     n_templates = sum(len(c.get("templates") or []) for c in classified)
-    events.append(trace("log.classify", f"templates={n_templates}",
-                        duration_ms=int((time.time()-t0)*1000)))
+    events.append(trace(
+        "log.classify",
+        f"templates={n_templates}",
+        reasoning=(
+            f"Drain3 로 {total_lines} 줄을 {n_templates} 개 템플릿으로 묶었습니다. "
+            "이 단계는 결정론적 코드라 LLM 호출 없이 처리됩니다."
+        ),
+        duration_ms=int((time.time() - t0) * 1000),
+    ))
 
     t0 = time.time()
-    findings = _rca(classified)
-    events.append(trace("log.rca", f"findings={len(findings)}",
-                        duration_ms=int((time.time()-t0)*1000), phase="exit"))
+    findings, rca_reasoning = _rca(classified)
+    events.append(trace(
+        "log.rca",
+        f"findings={len(findings)}",
+        phase="thought",
+        reasoning=rca_reasoning,
+        duration_ms=int((time.time() - t0) * 1000),
+    ))
 
     return {"log_findings": findings, "trace": events}

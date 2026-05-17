@@ -16,26 +16,34 @@ from ._common import llm_json, time_range, trace, utc_iso
 logger = logging.getLogger(__name__)
 
 _PLAN_SYSTEM = """\
-You are a DBA analyzing PostgreSQL, MySQL, and Kafka health.
-Output ONLY a JSON object:
+당신은 PostgreSQL / MySQL / Kafka 상태를 진단하는 DBA 입니다.
+사용자 요청을 보고 어떤 질의/메트릭을 봐야 가설을 검증할 수 있을지 판단합니다.
+
+출력은 JSON 한 객체:
 {
+  "reasoning": "사용자 요청을 X 로 해석했고, 이를 검증하기 위해 PG 의 A, MySQL 의 B, Kafka 의 C 를 확인하겠다 — 한국어 2~3 문장",
   "pg":    {"enable": bool, "queries": [{"name": str, "sql": str}, ...]},
   "mysql": {"enable": bool, "queries": [{"name": str, "sql": str}, ...]},
   "kafka": {"enable": bool, "metrics": [{"name": str, "metric": str}, ...]}
 }
-Rules:
-- SQL must be SELECT-only and reference system catalogs (pg_stat_*, INFORMATION_SCHEMA, performance_schema, INNODB_*).
-- Kafka metrics use AWS/Kafka CloudWatch metric names (BytesInPerSec, BytesOutPerSec, UnderReplicatedPartitions, ConsumerLag).
-- Skip a section by setting enable=false.
-- No prose, no code fences.
+
+규칙:
+- SQL 은 SELECT 전용, system catalog (pg_stat_*, INFORMATION_SCHEMA, performance_schema, INNODB_*) 만.
+- Kafka metric 이름은 AWS/Kafka CloudWatch (BytesInPerSec, BytesOutPerSec, UnderReplicatedPartitions, ConsumerLag).
+- 필요 없는 섹션은 enable=false.
+- JSON 외 prose/코드 펜스 금지.
 """
 
 _SUMMARY_SYSTEM = """\
-You write concise DB performance findings in Korean. Input is a JSON object with
-{"pg": [...], "mysql": [...], "kafka": [...], "correlations": [...]}.
-Output ONLY a JSON array: [{"title": str, "severity": "info"|"warn"|"error", "evidence": [...]}, ...].
-Cite specific objects (rows, statements, metric names) and timestamps when possible.
-No prose, no code fences.
+당신은 DB 성능 분석가입니다. 입력은 PG/MySQL/Kafka 도구 호출 결과와 cross-source correlation 입니다.
+실제 row/series 수치를 인용하면서, 발견된 비정상 패턴 → 가설로 이어지는 추론 흐름을 드러냅니다.
+
+출력은 JSON 한 객체:
+{
+  "reasoning": "PG active_sessions 에서 hot row 락이 보였고, 동일 시점 Kafka lag 가 같이 튀었으니 ... — 2~4 문장",
+  "findings": [{"title": str, "severity": "info"|"warn"|"error", "evidence": [...]}, ...]
+}
+JSON 외 금지.
 """
 
 _DEFAULT_PG_QUERIES = [
@@ -57,7 +65,7 @@ _DEFAULT_KAFKA_METRICS = [
 ]
 
 
-def _plan(state: AnalysisState) -> dict[str, Any]:
+def _plan(state: AnalysisState) -> tuple[dict[str, Any], str]:
     req = state.get("request") or {}
     user = (
         f"time_range={req.get('time_range')}\n"
@@ -65,14 +73,16 @@ def _plan(state: AnalysisState) -> dict[str, Any]:
         f"free_text={req.get('free_text')}"
     )
     default = {
+        "reasoning": "기본 PG/MySQL/Kafka 진단 쿼리 셋(폴백)을 실행합니다.",
         "pg":    {"enable": True, "queries": _DEFAULT_PG_QUERIES},
         "mysql": {"enable": True, "queries": _DEFAULT_MYSQL_QUERIES},
         "kafka": {"enable": True, "metrics": _DEFAULT_KAFKA_METRICS},
     }
     obj = llm_json(_PLAN_SYSTEM, user, default=default)
     if not isinstance(obj, dict):
-        return default
-    return obj
+        obj = default
+    reasoning = obj.get("reasoning") or default["reasoning"]
+    return obj, reasoning
 
 
 def _fetch_pg(state: AnalysisState, plan: dict[str, Any]) -> list[dict]:
@@ -171,39 +181,41 @@ def _correlate(pg: list[dict], mysql: list[dict], kafka: list[dict]) -> list[dic
     return [{"bucket": c.bucket, "sources": list(c.sources.keys())} for c in cross]
 
 
-def _summarize(payload: dict[str, Any]) -> list[Finding]:
-    fallback = []
+def _summarize(payload: dict[str, Any]) -> tuple[list[Finding], str]:
+    fb_findings: list[dict] = []
     for src in ("pg", "mysql"):
         for r in payload.get(src) or []:
             if r.get("rows"):
-                fallback.append(
-                    {
-                        "title": f"{src} {r['name']}: {len(r['rows'])} rows",
-                        "severity": "info",
-                        "evidence": r["rows"][:5],
-                    }
-                )
+                fb_findings.append({
+                    "title": f"{src} {r['name']}: {len(r['rows'])} rows",
+                    "severity": "info",
+                    "evidence": r["rows"][:5],
+                })
     for r in payload.get("kafka") or []:
         if r.get("series"):
-            fallback.append(
-                {
-                    "title": f"kafka {r['name']}: {len(r['series'])} points",
-                    "severity": "info",
-                    "evidence": r["series"][:5],
-                }
-            )
+            fb_findings.append({
+                "title": f"kafka {r['name']}: {len(r['series'])} points",
+                "severity": "info",
+                "evidence": r["series"][:5],
+            })
     if payload.get("correlations"):
-        fallback.append(
-            {
-                "title": f"cross-source bursts: {len(payload['correlations'])} buckets",
-                "severity": "warn",
-                "evidence": payload["correlations"][:5],
-            }
-        )
+        fb_findings.append({
+            "title": f"cross-source bursts: {len(payload['correlations'])} buckets",
+            "severity": "warn",
+            "evidence": payload["correlations"][:5],
+        })
+    fallback = {
+        "reasoning": "LLM 요약 실패로, 도구 결과를 그대로 카운트한 fallback finding 을 생성했습니다.",
+        "findings": fb_findings,
+    }
 
-    items = llm_json(_SUMMARY_SYSTEM, str(payload), default=fallback) or fallback
+    obj = llm_json(_SUMMARY_SYSTEM, str(payload), default=fallback)
+    if not isinstance(obj, dict):
+        obj = fallback
+    items = obj.get("findings") or fb_findings
+    reasoning = obj.get("reasoning") or fallback["reasoning"]
     if not isinstance(items, list):
-        items = fallback
+        items = fb_findings
 
     findings: list[Finding] = []
     for it in items:
@@ -219,19 +231,24 @@ def _summarize(payload: dict[str, Any]) -> list[Finding]:
                 "timestamp": utc_iso(0),
             }
         )
-    return findings
+    return findings, reasoning
 
 
 def run(state: AnalysisState) -> AnalysisState:
     events: list[dict] = [trace("db_subgraph", "enter", phase="enter")]
 
     t0 = time.time()
-    plan = _plan(state)
+    plan, plan_reasoning = _plan(state)
     pg_n = len((plan.get("pg") or {}).get("queries") or [])
     my_n = len((plan.get("mysql") or {}).get("queries") or [])
     kf_n = len((plan.get("kafka") or {}).get("metrics") or [])
-    events.append(trace("db.plan", f"pg={pg_n} mysql={my_n} kafka={kf_n}",
-                        duration_ms=int((time.time()-t0)*1000)))
+    events.append(trace(
+        "db.plan",
+        f"pg={pg_n} mysql={my_n} kafka={kf_n}",
+        phase="thought",
+        reasoning=plan_reasoning,
+        duration_ms=int((time.time() - t0) * 1000),
+    ))
 
     t0 = time.time()
     pg = _fetch_pg(state, plan.get("pg") or {})
@@ -240,18 +257,40 @@ def run(state: AnalysisState) -> AnalysisState:
     pg_rows = sum(len(r.get("rows") or []) for r in pg)
     my_rows = sum(len(r.get("rows") or []) for r in mysql)
     kf_pts = sum(len(r.get("series") or []) for r in kafka)
-    events.append(trace("db.fetch", f"pg_rows={pg_rows} mysql_rows={my_rows} kafka_points={kf_pts}",
-                        duration_ms=int((time.time()-t0)*1000)))
+    fetch_reasoning = (
+        f"MCP `sql-readonly___sql_readonly` 로 PG {pg_n} / MySQL {my_n} 쿼리를 실행하고 "
+        f"`msk-metrics___msk_metrics` 로 Kafka 메트릭 {kf_n} 건을 호출했습니다. "
+        f"수신: PG rows={pg_rows}, MySQL rows={my_rows}, Kafka points={kf_pts}."
+    )
+    events.append(trace(
+        "db.fetch",
+        f"pg_rows={pg_rows} mysql_rows={my_rows} kafka_points={kf_pts}",
+        phase="thought",
+        reasoning=fetch_reasoning,
+        duration_ms=int((time.time() - t0) * 1000),
+    ))
 
     t0 = time.time()
     correlations = _correlate(pg, mysql, kafka)
-    events.append(trace("db.correlate", f"cross_source_buckets={len(correlations)}",
-                        duration_ms=int((time.time()-t0)*1000)))
+    events.append(trace(
+        "db.correlate",
+        f"cross_source_buckets={len(correlations)}",
+        reasoning=(
+            f"60초 윈도 cross-source 발화 버킷 {len(correlations)}개 — "
+            "동일 시간대에 두 소스 이상이 같이 비정상이면 인과 가설을 만들 가치가 있다고 판단합니다."
+        ),
+        duration_ms=int((time.time() - t0) * 1000),
+    ))
 
     t0 = time.time()
     payload = {"pg": pg, "mysql": mysql, "kafka": kafka, "correlations": correlations}
-    findings = _summarize(payload)
-    events.append(trace("db.summarize", f"findings={len(findings)}",
-                        duration_ms=int((time.time()-t0)*1000), phase="exit"))
+    findings, summarize_reasoning = _summarize(payload)
+    events.append(trace(
+        "db.summarize",
+        f"findings={len(findings)}",
+        phase="thought",
+        reasoning=summarize_reasoning,
+        duration_ms=int((time.time() - t0) * 1000),
+    ))
 
     return {"db_findings": findings, "trace": events}

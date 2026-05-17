@@ -14,12 +14,19 @@ from ._common import llm_json, trace, utc_iso
 logger = logging.getLogger(__name__)
 
 _SYSTEM = """\
-You are a senior DBA building cross-domain hypotheses from OS/DB/log findings.
-Input is a JSON object with {"findings": [...], "co_occurrences": [...]}.
-co_occurrences entries are time buckets where multiple domains had findings.
-Output ONLY a JSON array:
-[{"statement": str, "supporting_finding_ids": [str, ...], "confidence": 0.0-1.0}, ...].
-Prefer 1-3 hypotheses. Reference finding ids from input. No prose, no code fences.
+당신은 시니어 DBA 입니다. OS / DB / Log 도메인의 finding 들을 보고
+시간축 동시 발화(co_occurrences) 를 단서로 인과 가설을 만듭니다.
+
+출력은 JSON 한 객체:
+{
+  "reasoning": "어떤 finding 들을 어떻게 묶었고, 왜 이 인과를 의심했는지를 한국어 2~4 문장으로 설명",
+  "hypotheses": [
+    {"statement": str, "supporting_finding_ids": [str, ...], "confidence": 0.0-1.0}, ...
+  ]
+}
+- 1~3개 가설 권장.
+- supporting_finding_ids 는 입력 finding 의 id 만 사용.
+- JSON 외 prose / 코드 펜스 금지.
 """
 
 
@@ -51,12 +58,17 @@ def run(state: AnalysisState) -> AnalysisState:
     findings = _gather(state)
     route = state.get("route")
     if route != "multi" and len(findings) < 2:
+        skip_reason = (
+            f"route={route} 단일 도메인이고 finding {len(findings)}건이라 "
+            f"교차 가설 단계는 건너뜁니다."
+        )
         return {
             "hypotheses": [],
             "trace": [trace("hypothesis",
                             f"skipped (route={route} findings={len(findings)})",
-                            phase="exit",
-                            duration_ms=int((time.time()-t0)*1000))],
+                            phase="thought",
+                            reasoning=skip_reason,
+                            duration_ms=int((time.time() - t0) * 1000))],
         }
 
     co = _co_occurrence(findings)
@@ -68,20 +80,28 @@ def run(state: AnalysisState) -> AnalysisState:
         "co_occurrences": co,
     }
 
-    fallback: list[dict] = []
+    fb_hyps: list[dict] = []
     if co:
         all_ids = [fid for c in co for ids in c["sources"].values() for fid in ids]
-        fallback.append(
+        fb_hyps.append(
             {
                 "statement": f"{len(co)} 시점에서 도메인 교차 이상이 동시 발화 — 동일 인과 의심.",
                 "supporting_finding_ids": list(dict.fromkeys(all_ids))[:8],
                 "confidence": 0.5,
             }
         )
+    fallback = {
+        "reasoning": "LLM 가설 생성 실패로, 시간 동시 발화 버킷만으로 fallback 가설을 생성했습니다.",
+        "hypotheses": fb_hyps,
+    }
 
-    items = llm_json(_SYSTEM, str(payload), default=fallback) or fallback
+    obj = llm_json(_SYSTEM, str(payload), default=fallback)
+    if not isinstance(obj, dict):
+        obj = fallback
+    items = obj.get("hypotheses") or fb_hyps
+    reasoning = obj.get("reasoning") or fallback["reasoning"]
     if not isinstance(items, list):
-        items = fallback
+        items = fb_hyps
 
     hypotheses: list[Hypothesis] = []
     for it in items:
@@ -101,8 +121,9 @@ def run(state: AnalysisState) -> AnalysisState:
         "hypotheses": hypotheses,
         "trace": [trace("hypothesis",
                         f"hypotheses={len(hypotheses)} co_buckets={len(co)} findings={len(findings)}",
-                        phase="exit",
-                        duration_ms=int((time.time()-t0)*1000))],
+                        phase="thought",
+                        reasoning=reasoning,
+                        duration_ms=int((time.time() - t0) * 1000))],
     }
 
 

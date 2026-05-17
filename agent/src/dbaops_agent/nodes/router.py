@@ -19,12 +19,16 @@ _KEYWORD_LOG = ("error", "에러", "log", "로그", "deadlock", "timeout", "pani
 _VALID: set[Route] = {"os", "db", "log", "multi"}
 
 _ROUTER_SYSTEM = """\
-You classify DBA/SRE analysis requests into ONE of: "os", "db", "log", "multi".
-- os: host CPU/memory/disk/network metrics only.
-- db: DBMS / Kafka internal metrics, locks, slow queries, lag.
-- log: error/slow/audit logs only.
-- multi: ambiguous OR needs cross-domain correlation.
-Output ONLY a JSON object: {"route": "<one of the four>"}. No prose.
+당신은 DBA/SRE 분석 요청을 분류하는 라우터입니다.
+사용자의 자연어 요청을 보고 다음 중 하나의 lens 로 분류하세요:
+- "os":   호스트 CPU/메모리/디스크/네트워크 메트릭만 보면 충분한 경우
+- "db":   DBMS / Kafka 내부 성능, 락, 슬로우 쿼리, lag 등 DB 면을 봐야 하는 경우
+- "log":  Error / Slow / Audit 로그 패턴만 보면 충분한 경우
+- "multi": 모호하거나, 도메인 간 교차 상관이 필요한 경우
+
+출력은 반드시 JSON 객체 한 개:
+{"route": "os|db|log|multi", "reasoning": "왜 이 lens 를 골랐는지 한국어 한두 문장. '사용자가 X 라고 했으므로 Y 가 의심되어 Z lens 가 적절하다' 식으로."}
+JSON 외의 prose 나 코드 펜스 금지.
 """
 
 
@@ -47,29 +51,43 @@ def _keyword_route(text: str) -> Route:
 def run(state: AnalysisState) -> AnalysisState:
     t0 = time.time()
     req = state.get("request") or {}
+    free_text = req.get("free_text", "") or ""
+    targets = req.get("targets") or []
+
     explicit = req.get("lens")
     if explicit in _VALID:
         ms = int((time.time() - t0) * 1000)
+        reasoning = (
+            f"사용자가 lens 를 `{explicit}` 로 직접 지정했습니다. "
+            f"요청 메시지({free_text[:80] or '—'})와 무관하게 그대로 따릅니다."
+        )
         return {
             "route": explicit,  # type: ignore[typeddict-item]
-            "trace": [trace("router", f"explicit lens={explicit}", phase="exit",
+            "trace": [trace("router", f"explicit lens={explicit}", phase="thought",
+                            reasoning=reasoning,
                             detail={"source": "request.lens"}, duration_ms=ms)],
         }
 
-    free_text = req.get("free_text", "") or ""
-    targets = req.get("targets") or []
     user_msg = f"free_text: {free_text}\ntargets: {targets}"
-
     obj = llm_json(_ROUTER_SYSTEM, user_msg, default=None)
-    route = (obj or {}).get("route") if isinstance(obj, dict) else None
-    source = "llm" if route in _VALID else "keyword_fallback"
-    if route not in _VALID:
+
+    if isinstance(obj, dict) and obj.get("route") in _VALID:
+        route = obj["route"]
+        reasoning = obj.get("reasoning") or f"LLM 라우팅으로 `{route}` 선택."
+        source = "llm"
+    else:
         route = _keyword_route(free_text)
+        reasoning = (
+            f"LLM 라우팅이 실패하거나 거부되어 키워드 폴백을 사용했습니다. "
+            f"`{free_text[:60]}` 안의 키워드 매칭 결과 `{route}` 로 분기합니다."
+        )
+        source = "keyword_fallback"
 
     ms = int((time.time() - t0) * 1000)
     return {
         "route": route,  # type: ignore[typeddict-item]
-        "trace": [trace("router", f"route={route}", phase="exit",
+        "trace": [trace("router", f"route={route}", phase="thought",
+                        reasoning=reasoning,
                         detail={"source": source, "free_text": free_text[:120]},
                         duration_ms=ms)],
     }

@@ -54,9 +54,11 @@ def time_range(state: dict, default_lookback_sec: int = 3600) -> tuple[str, str]
 
 
 def trace(node: str, summary: str, *, phase: str = "info", detail: dict[str, Any] | None = None,
-          duration_ms: int | None = None) -> dict[str, Any]:
+          duration_ms: int | None = None, reasoning: str | None = None) -> dict[str, Any]:
     """Trace 이벤트 한 건을 만든다. 노드들이 반환 dict 의 'trace' 키에 list 로 담아 보낸다."""
     ev: dict[str, Any] = {"ts": utc_iso(0), "node": node, "phase": phase, "summary": summary}
+    if reasoning:
+        ev["reasoning"] = reasoning
     if detail is not None:
         ev["detail"] = detail
     if duration_ms is not None:

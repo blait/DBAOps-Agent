@@ -44,8 +44,9 @@ def _extend_list(left: list | None, right: list | None) -> list:
 class TraceEvent(TypedDict, total=False):
     ts: str
     node: str
-    phase: Literal["enter", "exit", "info", "warn", "error"]
+    phase: Literal["enter", "exit", "info", "warn", "error", "thought"]
     summary: str
+    reasoning: str  # LLM 내러티브 (사용자에게 한국어로 보여주는 추론 흐름)
     detail: dict[str, Any]
     duration_ms: int
 
