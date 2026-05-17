@@ -8,7 +8,7 @@
       "db_id":    {"type": "string"},
       "start":    {"type": "string"},
       "end":      {"type": "string"},
-      "group_by": {"type": "string", "default": "db.sql_tokenized.statement"}
+      "group_by": {"type": "string", "description": "PI group prefix: db.sql_tokenized | db.wait_event | db.host | db.user | db.application"}
     }
   },
   "output_schema": {

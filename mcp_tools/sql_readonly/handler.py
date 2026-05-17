@@ -45,6 +45,38 @@ _BLOCKED_NODES = (
 )
 
 
+def _to_jsonable(v: Any) -> Any:
+    """DB driver 가 반환하는 datetime / Decimal / timedelta / bytes / UUID 를 JSON-safe 로 변환.
+
+    Lambda 의 자동 marshal 은 datetime 을 처리 못해 Runtime.MarshalError 가 난다.
+    """
+    import datetime as _dt
+    import decimal
+    import uuid
+
+    if v is None or isinstance(v, (str, int, float, bool)):
+        return v
+    if isinstance(v, (_dt.datetime, _dt.date, _dt.time)):
+        return v.isoformat()
+    if isinstance(v, _dt.timedelta):
+        return v.total_seconds()
+    if isinstance(v, decimal.Decimal):
+        # 정수면 int, 아니면 float
+        return int(v) if v == v.to_integral_value() else float(v)
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        try:
+            return bytes(v).decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            return repr(bytes(v))
+    if isinstance(v, uuid.UUID):
+        return str(v)
+    if isinstance(v, (list, tuple)):
+        return [_to_jsonable(x) for x in v]
+    if isinstance(v, dict):
+        return {str(k): _to_jsonable(x) for k, x in v.items()}
+    return str(v)
+
+
 def _validate(sql: str, dialect: str) -> str:
     """SELECT / SHOW / DESCRIBE / EXPLAIN 만 허용.
 
@@ -108,7 +140,7 @@ def _run_postgres(sql: str) -> dict[str, Any]:
             cur.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS}")
             cur.execute(sql)
             cols = [d.name for d in cur.description] if cur.description else []
-            rows = [list(r) for r in cur.fetchall()] if cur.description else []
+            rows = [[_to_jsonable(c) for c in r] for r in cur.fetchall()] if cur.description else []
     return {"columns": cols, "rows": rows, "row_count": len(rows)}
 
 
@@ -132,7 +164,7 @@ def _run_mysql(sql: str) -> dict[str, Any]:
             cur.execute(f"SET SESSION MAX_EXECUTION_TIME={STATEMENT_TIMEOUT_MS}")
             cur.execute(sql)
             cols = [d[0] for d in cur.description] if cur.description else []
-            rows = [list(r) for r in cur.fetchall()] if cur.description else []
+            rows = [[_to_jsonable(c) for c in r] for r in cur.fetchall()] if cur.description else []
         return {"columns": cols, "rows": rows, "row_count": len(rows)}
     finally:
         conn.close()
