@@ -1,13 +1,9 @@
-"""AgentCore Runtime entrypoint.
+"""AgentCore Runtime entrypoint — supervisor 그래프 only.
 
-AgentCore Runtime 은 컨테이너 내부에서 :8080/invocations 로 들어오는 POST 를 처리하길 기대한다.
-표준 라이브러리만으로 가벼운 HTTP 서버를 띄워, 외부 의존을 최소화한다.
-
+AgentCore Runtime 은 컨테이너 내부에서 :8080/invocations 로 들어오는 POST 를 처리.
 응답 형태:
-- mode=fast (default): 한 번에 JSON 한 객체 반환
-- mode=swarm + (Accept: application/x-ndjson 또는 request.stream=true): NDJSON streaming.
-  한 줄에 한 이벤트씩 chunked transfer 로 즉시 flush.
-- mode=swarm 그 외: 동기 호출, 한 번에 JSON 반환 (호환용)
+- 기본: 동기 호출, JSON 한 객체 반환
+- (Accept: application/x-ndjson 또는 request.stream=true) → NDJSON streaming
 """
 
 from __future__ import annotations
@@ -19,47 +15,41 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from .graph import compile_graph
-from .state import AnalysisState
-
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-
-_GRAPH = None
-
-
-def _get_graph():
-    global _GRAPH
-    if _GRAPH is None:
-        _GRAPH = compile_graph()
-    return _GRAPH
 
 
 def handler(event: dict, context: Any | None = None) -> dict:
     logger.info("invoke: %s", json.dumps(event)[:500])
     request = event.get("request") or {}
-    mode = (request.get("mode") or "fast").lower()
+    mode = (request.get("mode") or "swarm").lower()
 
-    if mode == "swarm":
-        from .swarm_graph import invoke_swarm
+    if mode == "single":
+        from .single_graph import invoke_single
         try:
-            result = invoke_swarm(
+            result = invoke_single(
                 request,
-                recursion_limit=int(os.environ.get("SWARM_RECURSION_LIMIT", "30")),
+                recursion_limit=int(os.environ.get("SINGLE_RECURSION_LIMIT", "80")),
             )
-            return {"swarm": result, "request": request}
+            return {"swarm": result, "request": request}  # UI 호환 — 응답 포맷 같음
         except Exception as e:  # noqa: BLE001
-            logger.exception("swarm invoke failed")
+            logger.exception("single invoke failed")
             return {"error": str(e), "request": request}
 
-    initial: AnalysisState = {
-        "request": request,
-        "raw_signals": {},
-        "messages": [],
-        "tool_budget": int(os.environ.get("TOOL_BUDGET", "32")),
-    }
-    final = _get_graph().invoke(initial)
-    return {"report": final.get("report")}
+    # default: swarm (3 supervisor)
+    from .swarm_graph import invoke_swarm, supervisor_keys
+    sup = request.get("supervisor")
+    if sup and sup not in supervisor_keys():
+        return {"error": f"unknown supervisor: {sup}. valid={supervisor_keys()}", "request": request}
+    try:
+        result = invoke_swarm(
+            request,
+            recursion_limit=int(os.environ.get("SWARM_RECURSION_LIMIT", "30")),
+        )
+        return {"swarm": result, "request": request}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("swarm invoke failed")
+        return {"error": str(e), "request": request}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -137,22 +127,25 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             event = self._read_body()
             request = event.get("request") or {}
-            mode = (request.get("mode") or "fast").lower()
             stream_requested = (
                 request.get("stream") is True
                 or "ndjson" in (self.headers.get("Accept") or "").lower()
             )
 
             if stream_requested:
-                if mode == "swarm":
+                mode = (request.get("mode") or "swarm").lower()
+                if mode == "single":
+                    from .single_graph import iter_single
+                    self._stream_iterator(iter_single(
+                        request,
+                        recursion_limit=int(os.environ.get("SINGLE_RECURSION_LIMIT", "80")),
+                    ))
+                else:
                     from .swarm_graph import iter_swarm
                     self._stream_iterator(iter_swarm(
                         request,
                         recursion_limit=int(os.environ.get("SWARM_RECURSION_LIMIT", "30")),
                     ))
-                else:
-                    from .graph import iter_fast
-                    self._stream_iterator(iter_fast(request))
                 return
 
             result = handler(event)
@@ -173,7 +166,7 @@ def serve(host: str = "0.0.0.0", port: int = 8080) -> None:
 
 def main(argv: list[str]) -> int:
     if "--once" in argv:
-        out = handler({"request": {"free_text": "smoke", "lens": "os"}})
+        out = handler({"request": {"free_text": "smoke", "supervisor": "os_metric"}})
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return 0
     serve(port=int(os.environ.get("PORT", "8080")))

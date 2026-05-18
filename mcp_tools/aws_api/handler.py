@@ -256,60 +256,10 @@ def describe_ec2_instances(args: dict) -> dict:
     return _truncate({"instances": items, "count": len(items)})
 
 
-def list_cloudwatch_alarms(args: dict) -> dict:
-    """CloudWatch 메트릭 알람 목록.
-
-    args: {"state_value": str?, "alarm_name_prefix": str?, "max": int?}
-    """
-    cw = _client("cloudwatch")
-    kwargs: dict[str, Any] = {"MaxRecords": min(int(args.get("max", 50)), 100)}
-    if args.get("state_value"):
-        kwargs["StateValue"] = args["state_value"]   # OK / ALARM / INSUFFICIENT_DATA
-    if args.get("alarm_name_prefix"):
-        kwargs["AlarmNamePrefix"] = args["alarm_name_prefix"]
-    resp = cw.describe_alarms(**kwargs)
-    return _truncate({
-        "alarms": [
-            {
-                "name":      a.get("AlarmName"),
-                "state":     a.get("StateValue"),
-                "metric":    a.get("MetricName"),
-                "namespace": a.get("Namespace"),
-                "threshold": a.get("Threshold"),
-                "operator":  a.get("ComparisonOperator"),
-                "updated":   a.get("StateUpdatedTimestamp"),
-            }
-            for a in resp.get("MetricAlarms", [])
-        ]
-    })
-
-
-def list_metric_namespaces(args: dict) -> dict:
-    """현재 계정/리전의 CloudWatch namespace + 메트릭 빠른 탐색."""
-    cw = _client("cloudwatch")
-    namespace = args.get("namespace")
-    metric_prefix = args.get("metric_prefix") or ""
-    kwargs: dict[str, Any] = {}
-    if namespace:
-        kwargs["Namespace"] = namespace
-    if metric_prefix:
-        kwargs["MetricName"] = metric_prefix
-
-    seen_ns: set[str] = set()
-    metrics: list[dict] = []
-    paginator = cw.get_paginator("list_metrics")
-    for page in paginator.paginate(**kwargs):
-        for m in page.get("Metrics") or []:
-            seen_ns.add(m.get("Namespace") or "?")
-            if len(metrics) < 200:
-                metrics.append({
-                    "namespace":  m.get("Namespace"),
-                    "metric":     m.get("MetricName"),
-                    "dimensions": [(d.get("Name"), d.get("Value")) for d in (m.get("Dimensions") or [])][:4],
-                })
-        if len(metrics) >= 200:
-            break
-    return _truncate({"namespaces": sorted(seen_ns), "metrics": metrics})
+# NOTE: list_cloudwatch_alarms / list_metric_namespaces 는
+# awslabs.cloudwatch-mcp-server (get_active_alarms / get_alarm_history /
+# get_metric_metadata) 가 더 풍부하게 제공해서 제거했음. 라우팅: aws_specialist
+# → cloudwatch-mcp 로 transfer.
 
 
 _PI_VALID_GROUPS = {
@@ -391,25 +341,57 @@ _TOOLS = {
     "download_db_log_file_portion": download_db_log_file_portion,
     "list_msk_clusters":           list_msk_clusters,
     "describe_ec2_instances":      describe_ec2_instances,
-    "list_cloudwatch_alarms":      list_cloudwatch_alarms,
-    "list_metric_namespaces":      list_metric_namespaces,
     "describe_pi_dimensions":      describe_pi_dimensions,
 }
 
 
-def handler(event: dict, _ctx) -> dict:
+def _extract_tool_name(event: dict, body: dict, ctx) -> str | None:
+    """Gateway 가 도구 이름을 어디로 넘기는지가 버전에 따라 다르다 — 모든 위치 탐색."""
+    if isinstance(event, dict):
+        for k in ("tool_name", "bedrockAgentCoreToolName", "__tool__", "toolName"):
+            v = event.get(k)
+            if v:
+                return v
+        # AgentCore Gateway 의 lambda invocation context
+        rc = event.get("requestContext") or {}
+        cust = rc.get("customAuthorizerContext") or rc.get("authorizer") or {}
+        if isinstance(cust, dict):
+            for k in ("bedrockAgentCoreToolName", "tool_name"):
+                v = cust.get(k)
+                if v:
+                    return v
+    for k in ("tool_name", "bedrockAgentCoreToolName", "__tool__"):
+        v = body.get(k)
+        if v:
+            return v
+    # client_context (Lambda invoke 의 별도 채널) 에 들어오는 케이스
+    try:
+        client_ctx = getattr(ctx, "client_context", None)
+        if client_ctx and getattr(client_ctx, "custom", None):
+            for k in ("bedrockAgentCoreToolName", "tool_name"):
+                v = client_ctx.custom.get(k)
+                if v:
+                    return v
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def handler(event: dict, ctx) -> dict:
     body = _payload(event)
-    # Gateway 가 inline payload 의 도구를 invoke 할 때:
-    #   1) event["tool_name"] / event["arguments"] 형태
-    #   2) event 자체가 args 면 fallback 으로 처리
-    tool_name = (
-        event.get("tool_name")
-        if isinstance(event, dict) else None
-    ) or body.get("__tool__") or body.get("tool_name")
+    # Gateway / 직접 invoke / inline payload 호환 — 도구 이름 다층 탐색
+    tool_name = _extract_tool_name(event, body, ctx)
+    # tool name prefix 가 'aws-api___describe_xxx' 처럼 들어올 수도 있음
+    if isinstance(tool_name, str) and "___" in tool_name:
+        tool_name = tool_name.rsplit("___", 1)[-1]
     args = body.get("arguments") if "arguments" in body else body
 
     if not tool_name:
-        return {"error": "missing tool_name", "available": list(_TOOLS.keys())}
+        logger.warning("missing tool_name — event keys: %s, body keys: %s",
+                       list(event.keys()) if isinstance(event, dict) else type(event),
+                       list(body.keys()) if isinstance(body, dict) else type(body))
+        return {"error": "missing tool_name", "available": list(_TOOLS.keys()),
+                "debug": {"event_keys": list(event.keys()) if isinstance(event, dict) else None}}
     fn = _TOOLS.get(tool_name)
     if fn is None:
         return {"error": f"unknown tool '{tool_name}'", "available": list(_TOOLS.keys())}

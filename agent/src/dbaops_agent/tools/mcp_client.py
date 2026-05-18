@@ -130,6 +130,62 @@ class MCPClient:
             cache[_cache_key(tool, params)] = result
         return result
 
+    def list_tools(self, *, max_pages: int = 20) -> list[dict[str, Any]]:
+        """MCP `tools/list` 호출 — Gateway 가 노출하는 모든 도구를 페이지네이션으로 모두 수집.
+
+        AgentCore Gateway 는 한 페이지당 ~30 도구를 보내고 nextCursor 로 이어진다.
+        max_pages 까지 follow.
+        """
+        if not self.endpoint:
+            logger.warning("GATEWAY_ENDPOINT empty — returning empty tool list")
+            return []
+
+        all_tools: list[dict[str, Any]] = []
+        cursor: str | None = None
+        for page in range(max_pages):
+            params: dict[str, Any] = {}
+            if cursor:
+                params["cursor"] = cursor
+            body = json.dumps({
+                "jsonrpc": "2.0",
+                "id":      f"tools-list-{page}",
+                "method":  "tools/list",
+                "params":  params,
+            }).encode()
+            headers = {"Content-Type": "application/json"}
+            token = _TOKENS.get()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+
+            last_err: Exception | None = None
+            for attempt in range(self.max_retries + 1):
+                try:
+                    req = urllib.request.Request(self.endpoint, data=body, headers=headers, method="POST")
+                    with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                        raw = resp.read()
+                    data = json.loads(raw)
+                    if isinstance(data, dict) and "error" in data:
+                        raise RuntimeError(f"MCP tools/list error: {data['error']}")
+                    result = data.get("result", data) if isinstance(data, dict) else data
+                    tools = (result or {}).get("tools") if isinstance(result, dict) else None
+                    if isinstance(tools, list):
+                        all_tools.extend(tools)
+                    cursor = (result or {}).get("nextCursor") if isinstance(result, dict) else None
+                    last_err = None
+                    break
+                except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, RuntimeError, json.JSONDecodeError) as e:
+                    last_err = e
+                    wait = 0.5 * (2**attempt)
+                    logger.warning("tools/list page=%d attempt %d failed: %s (retry in %.1fs)", page, attempt + 1, e, wait)
+                    time.sleep(wait)
+            if last_err:
+                raise RuntimeError(f"tools/list failed at page {page}: {last_err}")
+            if not cursor:
+                break
+
+        logger.info("tools/list collected %d tools across %d pages", len(all_tools), page + 1)
+        return all_tools
+
     def _invoke(self, tool: str, params: dict[str, Any]) -> Any:
         if not self.endpoint:
             logger.warning("GATEWAY_ENDPOINT empty — returning stub for %s", tool)

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
 from langchain_core.tools import tool
@@ -35,99 +36,311 @@ def _truncate(obj: Any, max_chars: int = 8000) -> str:
 
 
 # ───────────────────────── OS / 인프라 ─────────────────────────
+# Prometheus: pab1it0/prometheus-mcp-server (community-prometheus target)
+# CloudWatch: awslabs.cloudwatch-mcp-server (awslabs-cloudwatch target)
 
 
 @tool
-def prometheus_query(promql: str, start: str, end: str, step: str = "30s") -> str:
-    """Prometheus 시계열을 가져온다 (단일 타깃 node_exporter).
+def prometheus_query(query: str, time: str | None = None) -> str:
+    """[OS/Host metric · instant] EC2 self-hosted Prometheus 의 한 시점 PromQL 평가 (pab1it0/prometheus-mcp-server).
+
+    Use this for a single point-in-time host metric reading from node_exporter. For trends use
+    prometheus_range_query. Prefer this over cloudwatch_metric when the metric is host-level
+    (load, fd, conntrack, fs.* — CloudWatch does not have these).
 
     Args:
-        promql: PromQL 식. instance 라벨 필터는 사용하지 말 것.
-        start: RFC3339 시작 시각 (예: 2026-05-17T05:00:00+00:00)
-        end:   RFC3339 종료 시각
-        step:  step (예: "30s", "1m")
+        query: PromQL one-liner (instant vector compatible).
+        time:  RFC3339 시각. 생략 시 서버 현재.
+
+    Returns: `{status, data:{resultType:'vector', result:[{metric, value:[ts, "v"]}]}}`.
     """
-    r = _get_client().call("prometheus-query___prometheus_query",
-                           {"promql": promql, "start": start, "end": end, "step": step})
-    series = (r or {}).get("series") or []
-    return _truncate({"n_points": len(series), "series": series[:200]})
+    args: dict[str, Any] = {"query": query}
+    if time:
+        args["time"] = time
+    r = _get_client().call("community-prometheus___execute_query", args)
+    return _truncate(r or {})
 
 
 @tool
-def cloudwatch_metric(namespace: str, metric: str, dimensions: dict[str, str],
-                      start: str, end: str, stat: str = "Average", period: int = 60) -> str:
-    """AWS CloudWatch GetMetricData 한 메트릭을 가져온다.
+def prometheus_range_query(query: str, start: str, end: str, step: str = "30s") -> str:
+    """[OS/Host metric · range] EC2 self-hosted Prometheus 의 시계열 PromQL 평가 (pab1it0/prometheus-mcp-server).
+
+    Use this for host-level OS metric trends from node_exporter. The exporter set on the host
+    determines which metric names exist — verify with prometheus_query first if uncertain about
+    a metric name. Do not assume a metric exists from training data alone.
+
+    step sizing:
+      - 결과 점 수 = (end - start) / step. range/step 가 ≈ 50~120 정도가 적당.
+      - rate/increase 의 lookback ([Xm]) 은 step 보다 충분히 커야 함 (보통 step 의 3~5배).
 
     Args:
-        namespace: 예 "AWS/EC2", "AWS/RDS"
-        metric:    예 "CPUUtilization", "DatabaseConnections"
-        dimensions: 예 {"InstanceId": "i-..."}, {"DBInstanceIdentifier": "..."}
-        start/end: RFC3339
-        stat:      Average / Sum / Maximum / Minimum
-        period:    초 단위 (기본 60)
+        query:     PromQL (range-vector compatible)
+        start/end: RFC3339 UTC
+        step:      '30s' / '1m' / '5m' 등
+
+    Returns: `{status, data:{resultType:'matrix', result:[{metric, values:[[ts,"v"],...]}]}}`.
     """
-    r = _get_client().call("cloudwatch-metrics___cloudwatch_get_metric_data", {
-        "namespace": namespace, "metric": metric, "dimensions": dimensions or {},
-        "start": start, "end": end, "stat": stat, "period": period,
+    r = _get_client().call("community-prometheus___execute_range_query",
+                           {"query": query, "start": start, "end": end, "step": step})
+    return _truncate(r or {})
+
+
+@tool
+def cloudwatch_metric(namespace: str, metric_name: str, start_time: str, end_time: str,
+                      dimensions: list[dict] | None = None,
+                      statistic: str = "Average", period: int = 60) -> str:
+    """[AWS managed metric · time-series] CloudWatch GetMetricData (awslabs cloudwatch-mcp).
+
+    Use this for AWS-managed service metrics (RDS, Aurora, EC2, MSK, Lambda, S3, ELB).
+    For self-managed host OS metrics (load, fd, conntrack), use prometheus_range_query.
+
+    Empty result usually means: dimensions wrong / window has no traffic / metric name mismatch.
+    Verify the dimension schema for the namespace before retrying.
+
+    Statistic guidance:
+      - 'Average' for general trend
+      - 'Maximum' for burst peak (use this for IOPS / connection spike)
+      - 'Sum' for cumulative volume
+
+    Period: 60s default. For windows >6h consider 300. RDS metrics support 1-min granularity.
+
+    For MSK consumer lag / topic throughput, prefer msk_metric — it auto-wires the
+    Cluster Name + Topic + Consumer Group dimensions.
+
+    Args:
+        namespace:   e.g. 'AWS/EC2', 'AWS/RDS', 'AWS/Kafka', 'AWS/Lambda'
+        metric_name: e.g. 'CPUUtilization', 'DatabaseConnections', 'ReadIOPS', 'FreeableMemory'
+        start_time / end_time: ISO8601 UTC
+        dimensions:  [{'Name': key, 'Value': value}, ...]
+        statistic:   'Average' / 'Maximum' / 'Minimum' / 'Sum' / 'SampleCount'
+        period:      seconds (60 / 300 / 3600)
+
+    Returns: `{metricDataResults: [{id, label, timestamps, values, statusCode}], messages}`.
+    """
+    args: dict[str, Any] = {
+        "namespace":   namespace,
+        "metric_name": metric_name,
+        "start_time":  start_time,
+        "end_time":    end_time,
+        "statistic":   statistic,
+        "period":      period,
+    }
+    if dimensions:
+        args["dimensions"] = dimensions
+    r = _get_client().call("awslabs-cloudwatch___get_metric_data", args)
+    return _truncate(r or {})
+
+
+@tool
+def cloudwatch_get_active_alarms(max_items: int = 50) -> str:
+    """현재 ALARM 상태인 CloudWatch 알람 목록 (awslabs cloudwatch-mcp).
+
+    Args:
+        max_items: 최대 반환 수
+    """
+    r = _get_client().call("awslabs-cloudwatch___get_active_alarms", {"max_items": max_items})
+    return _truncate(r or {})
+
+
+@tool
+def cloudwatch_get_alarm_history(alarm_name: str, max_items: int = 30) -> str:
+    """특정 알람의 상태 전이 이력.
+
+    Args:
+        alarm_name: 알람 이름
+        max_items: 최대 항목 수
+    """
+    r = _get_client().call("awslabs-cloudwatch___get_alarm_history",
+                           {"alarm_name": alarm_name, "max_items": max_items})
+    return _truncate(r or {})
+
+
+@tool
+def cloudwatch_describe_log_groups(log_group_name_prefix: str | None = None,
+                                    max_items: int = 50) -> str:
+    """CloudWatch Logs 의 log group 목록.
+
+    Args:
+        log_group_name_prefix: 이름 prefix 필터
+        max_items: 최대 반환 수
+    """
+    args: dict[str, Any] = {"max_items": max_items}
+    if log_group_name_prefix:
+        args["log_group_name_prefix"] = log_group_name_prefix
+    r = _get_client().call("awslabs-cloudwatch___describe_log_groups", args)
+    return _truncate(r or {})
+
+
+@tool
+def cloudwatch_execute_log_insights_query(log_group_names: list[str],
+                                           query_string: str,
+                                           start_time: str, end_time: str,
+                                           limit: int = 100) -> str:
+    """[Log · query] CloudWatch Logs Insights query (awslabs cloudwatch-mcp).
+
+    Use this for frequency / pattern aggregation across one or more log groups (stats by bin),
+    not just plain grep. Discover concrete group names with cloudwatch_describe_log_groups
+    before calling — do not guess.
+
+    Args:
+        log_group_names: list of CloudWatch Logs group names (e.g., '/aws/...', '/dbaops/poc/postgres')
+        query_string:    Logs Insights query (pipe-separated stages)
+        start_time / end_time: ISO8601 UTC
+        limit:           result-row cap (default 100). stats outputs are not bounded by limit.
+
+    Returns: `{queryId, status, results:[{field:val, ...}], statistics}`.
+    """
+    r = _get_client().call("awslabs-cloudwatch___execute_log_insights_query", {
+        "log_group_names": log_group_names,
+        "query_string":    query_string,
+        "start_time":      start_time,
+        "end_time":        end_time,
+        "limit":           limit,
     })
-    series = (r or {}).get("series") or []
-    return _truncate({"n_points": len(series), "series": series[:200]})
+    return _truncate(r or {}, max_chars=14000)
 
 
-# ───────────────────────── DB ─────────────────────────
+# ───────────────────────── DB (PG / MySQL) ─────────────────────────
+# PG:    crystaldba/postgres-mcp restricted RO (community-postgres target)
+# MySQL: benborla/mcp-server-mysql RO default (community-mysql target)
 
 
 @tool
-def sql_readonly(engine: str, db_id: str, sql: str) -> str:
-    """PostgreSQL 또는 MySQL 에 SELECT/SHOW/DESCRIBE/EXPLAIN 쿼리를 실행한다.
+def pg_execute_sql(sql: str) -> str:
+    """Aurora PG 에 read-only SQL 실행 (postgres-mcp restricted mode).
 
-    sqlglot AST gate 로 INSERT/UPDATE/DELETE/MERGE/DDL 등은 거부됩니다. statement_timeout 5s.
-
-    Args:
-        engine: "postgres" 또는 "mysql"
-        db_id:  RDS 인스턴스/클러스터 식별자 (예 "dbaops-poc-aurora-pg", "dbaops-poc-mysql")
-        sql:    SELECT / SHOW / DESCRIBE / EXPLAIN [ANALYZE|...] SELECT...
+    DML/DDL 은 서버 레벨에서 거부됨. SELECT 만 가능.
     """
-    r = _get_client().call("sql-readonly___sql_readonly",
-                           {"engine": engine, "db_id": db_id, "sql": sql})
-    rows = (r or {}).get("rows") or []
-    cols = (r or {}).get("columns") or []
-    return _truncate({"row_count": len(rows), "columns": cols, "rows": rows[:50]})
+    r = _get_client().call("community-postgres___execute_sql", {"sql": sql})
+    return _truncate(r or {})
 
 
 @tool
-def explain_query(engine: str, db_id: str, sql: str, analyze: bool = False) -> str:
-    """SQL 의 실행계획을 가져온다 (EXPLAIN [ANALYZE]).
+def pg_explain_query(sql: str, hypothetical_indexes: list[dict] | None = None) -> str:
+    """[PG · EXPLAIN] PG 의 실행계획 분석. **SELECT 본문만 넣으세요 — 'EXPLAIN' 접두 금지** (도구가 자동으로 붙입니다).
 
-    PG:    EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) <SELECT> 또는 EXPLAIN <SELECT>.
-    MySQL: EXPLAIN ANALYZE <SELECT> (8.0.18+) 또는 EXPLAIN FORMAT=TREE <SELECT>.
+    가상 인덱스(hypothetical_indexes)로 'CREATE INDEX 했을 때' 시뮬레이션 가능.
 
     Args:
-        engine:  "postgres" 또는 "mysql"
-        db_id:   RDS 인스턴스/클러스터 식별자
-        sql:     실행계획을 보고 싶은 SELECT. EXPLAIN 접두는 자동.
-        analyze: True 면 ANALYZE — 실제로 실행하므로 무거운 쿼리에는 주의.
+        sql: 분석할 **SELECT 한 줄** — `EXPLAIN`/`EXPLAIN ANALYZE`/`EXPLAIN (FORMAT JSON)` 접두를 붙이지 마세요.
+             도구가 내부적으로 EXPLAIN [ANALYZE] [FORMAT] 을 자동 wrap. 접두를 붙이면 'EXPLAIN EXPLAIN ...' 이 되어 파서 거부.
+             OK :   `SELECT * FROM dbaops_orders WHERE user_id=123`
+             BAD:   `EXPLAIN SELECT * FROM ...`  ← 거부됨
+        hypothetical_indexes: [{"table":"orders","columns":["user_id"],"using":"btree"}, ...] — 가상 인덱스 시뮬.
+    """
+    # idempotent 안전장치 — agent 가 EXPLAIN 붙여 보내도 자동 stripping.
+    cleaned = sql.strip().rstrip(";")
+    upper = cleaned.upper().lstrip()
+    while upper.startswith("EXPLAIN"):
+        # EXPLAIN, EXPLAIN ANALYZE, EXPLAIN (FORMAT JSON), EXPLAIN VERBOSE 등 접두 모두 제거
+        # 다음 SQL keyword (SELECT/WITH/INSERT/UPDATE/DELETE) 까지 잘라내기
+        m = re.search(r"\b(SELECT|WITH|INSERT|UPDATE|DELETE)\b", cleaned, re.IGNORECASE)
+        if not m:
+            break
+        cleaned = cleaned[m.start():]
+        upper = cleaned.upper().lstrip()
+    args: dict[str, Any] = {"sql": cleaned}
+    if hypothetical_indexes:
+        args["hypothetical_indexes"] = hypothetical_indexes
+    r = _get_client().call("community-postgres___explain_query", args)
+    return _truncate(r or {}, max_chars=12000)
+
+
+@tool
+def pg_analyze_db_health(health_type: str = "all") -> str:
+    """PG 데이터베이스 헬스 종합 분석 — buffer/cache/connections/replication/vacuum 등.
+
+    Args:
+        health_type: 'all' / 'index' / 'connection' / 'vacuum' / 'sequence' / 'replication' / 'buffer' / 'constraint'
+    """
+    r = _get_client().call("community-postgres___analyze_db_health", {"health_type": health_type})
+    return _truncate(r or {})
+
+
+@tool
+def pg_get_top_queries(sort_by: str = "resources", limit: int = 10) -> str:
+    """pg_stat_statements 기반 top 쿼리.
+
+    Args:
+        sort_by: 'resources' / 'mean_time' / 'total_time'
+        limit: 반환 쿼리 수
+    """
+    r = _get_client().call("community-postgres___get_top_queries",
+                           {"sort_by": sort_by, "limit": limit})
+    return _truncate(r or {})
+
+
+@tool
+def pg_analyze_workload_indexes(max_index_size_mb: int = 10000) -> str:
+    """워크로드 분석 후 추가 인덱스 권고."""
+    r = _get_client().call("community-postgres___analyze_workload_indexes",
+                           {"max_index_size_mb": max_index_size_mb})
+    return _truncate(r or {})
+
+
+@tool
+def pg_list_schemas() -> str:
+    """PG 의 모든 스키마 목록."""
+    r = _get_client().call("community-postgres___list_schemas", {})
+    return _truncate(r or {})
+
+
+@tool
+def pg_list_objects(schema_name: str, object_type: str = "table") -> str:
+    """스키마 내 객체 목록.
+
+    Args:
+        schema_name: 'public', 'information_schema' 등
+        object_type: 'table' / 'view' / 'sequence' / 'extension'
+    """
+    r = _get_client().call("community-postgres___list_objects",
+                           {"schema_name": schema_name, "object_type": object_type})
+    return _truncate(r or {})
+
+
+@tool
+def mysql_query(sql: str) -> str:
+    """[MySQL · RO SQL] RDS MySQL read-only SELECT (benborla mcp-server-mysql).
+
+    Use cases (검증된 출처):
+      - mysql.slow_log SELECT — log_output=TABLE 이라 직접 SELECT 가능.
+      - performance_schema (events_statements_summary_by_digest, data_lock_waits, processlist).
+      - information_schema (STATISTICS, TABLES, COLUMNS).
+      - 사용자 스키마 SELECT (LIMIT 필수).
+
+    Constraints:
+      - DML/DDL 차단 (INSERT/UPDATE/DELETE/CREATE/DROP). SELECT 만.
+      - 결과는 14000자에서 truncate. 큰 테이블 SELECT * 금지 — LIMIT 필수.
+      - 파서가 EXPLAIN 뒤에 SELECT/WITH 만 허용 (EXPLAIN ANALYZE / FORMAT=... 거부).
+        실행계획은 mysql_explain 사용.
+
+    Args:
+        sql: SELECT 한 줄.
+    """
+    r = _get_client().call("community-mysql___mysql_query", {"sql": sql})
+    return _truncate(r or {}, max_chars=14000)
+
+
+@tool
+def mysql_explain(sql: str) -> str:
+    """[MySQL · EXPLAIN] MySQL 실행계획. **SELECT 본문만 넣으세요** (도구가 'EXPLAIN ' 자동 prepend).
+
+    제약:
+      - benborla mcp-server-mysql 의 SQL 파서는 `EXPLAIN` 뒤에 `SELECT`/`WITH` 만 허용.
+        `EXPLAIN ANALYZE` / `EXPLAIN FORMAT=TREE` / `EXPLAIN FORMAT=JSON` 은 모두 거부됨 (파서 한계).
+        따라서 본 도구는 **plain `EXPLAIN <SELECT>`** 만 실행. 결과 형식: tabular (id/select_type/table/type/possible_keys/key/rows/Extra).
+      - 'ANALYZE' 같은 실측 통계가 필요하면 우회 — performance_schema.events_statements_summary_by_digest 의 sum_no_index_used / rows_examined / sum_timer_wait 를 보세요.
+
+    Args:
+        sql: **SELECT 한 줄** — 'EXPLAIN'/'EXPLAIN ANALYZE'/'EXPLAIN FORMAT=...' 접두 금지 (붙여도 자동 strip).
+
+    PG 는 pg_explain_query 를 쓰세요 (postgres-mcp 가 ANALYZE/JSON 모두 지원해 훨씬 풍부).
     """
     base = sql.strip().rstrip(";")
-    upper = base.upper().lstrip()
-    if upper.startswith("EXPLAIN"):
-        wrapped = base
-    elif engine == "postgres":
-        wrapped = f"EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) {base}" if analyze else f"EXPLAIN {base}"
-    else:
-        wrapped = f"EXPLAIN ANALYZE {base}" if analyze else f"EXPLAIN FORMAT=TREE {base}"
-
-    r = _get_client().call("sql-readonly___sql_readonly",
-                           {"engine": engine, "db_id": db_id, "sql": wrapped})
-    rows = (r or {}).get("rows") or []
-    cols = (r or {}).get("columns") or []
-    err = (r or {}).get("error")
-    if err:
-        return _truncate({"error": err, "validated_sql": (r or {}).get("validated_sql")})
-    if cols and rows and len(cols) == 1:
-        plan_text = "\n".join(str(row[0]) for row in rows)
-        return _truncate({"plan": plan_text, "row_count": len(rows)}, max_chars=12000)
-    return _truncate({"row_count": len(rows), "columns": cols, "rows": rows[:200]}, max_chars=12000)
+    m = re.search(r"\b(SELECT|WITH)\b", base, re.IGNORECASE)
+    body = base[m.start():] if m else base
+    r = _get_client().call("community-mysql___mysql_query", {"sql": f"EXPLAIN {body}"})
+    return _truncate(r or {}, max_chars=12000)
 
 
 @tool
@@ -343,40 +556,9 @@ def aws_describe_ec2_instances(instance_ids: list[str] | None = None,
     return _truncate(_aws_call("describe_ec2_instances", args))
 
 
-@tool
-def aws_list_cloudwatch_alarms(state_value: str | None = None,
-                                alarm_name_prefix: str | None = None,
-                                max: int = 50) -> str:
-    """AWS CloudWatch DescribeAlarms — 메트릭 알람 목록(상태/임계값/마지막 변경).
-
-    Args:
-        state_value: OK / ALARM / INSUFFICIENT_DATA
-        alarm_name_prefix: 알람 이름 prefix
-        max: 기본 50, 최대 100
-    """
-    args: dict[str, Any] = {"max": max}
-    if state_value:
-        args["state_value"] = state_value
-    if alarm_name_prefix:
-        args["alarm_name_prefix"] = alarm_name_prefix
-    return _truncate(_aws_call("list_cloudwatch_alarms", args))
-
-
-@tool
-def aws_list_metric_namespaces(namespace: str | None = None,
-                                metric_prefix: str | None = None) -> str:
-    """AWS CloudWatch ListMetrics — 계정/리전의 namespace + 메트릭 빠른 탐색(존재 여부 확인용).
-
-    Args:
-        namespace: 예 AWS/RDS, AWS/EC2
-        metric_prefix: 메트릭 이름 prefix
-    """
-    args: dict[str, Any] = {}
-    if namespace:
-        args["namespace"] = namespace
-    if metric_prefix:
-        args["metric_prefix"] = metric_prefix
-    return _truncate(_aws_call("list_metric_namespaces", args))
+# NOTE: aws_list_cloudwatch_alarms / aws_list_metric_namespaces 는
+# awslabs cloudwatch-mcp 의 cloudwatch_get_active_alarms / get_metric_metadata
+# 로 대체되어 제거됨. supervisor 가 자동으로 라우팅.
 
 
 @tool
@@ -404,25 +586,144 @@ def aws_describe_pi_dimensions(dbi_resource_id: str, metric: str = "db.load.avg"
     return _truncate(_aws_call("describe_pi_dimensions", args))
 
 
+# ───────────────────────── awslabs aws-documentation MCP ─────────────────────────
+
+
+@tool
+def aws_doc_search(search_phrase: str, limit: int = 10) -> str:
+    """AWS 공식 docs 검색 (awslabs aws-documentation-mcp).
+
+    Args:
+        search_phrase: 검색어 (예: 'Aurora PostgreSQL max_connections default')
+        limit: 결과 수
+    """
+    r = _get_client().call("awslabs-aws-doc___search_documentation",
+                           {"search_phrase": search_phrase, "limit": limit})
+    return _truncate(r or {})
+
+
+@tool
+def aws_doc_read(url: str, max_length: int = 8000, start_index: int = 0) -> str:
+    """AWS 공식 docs URL 의 본문을 markdown 으로 가져온다.
+
+    Args:
+        url: 'https://docs.aws.amazon.com/...' 형식 URL
+        max_length: 한 번에 받을 최대 글자
+        start_index: 페이지네이션용 offset
+    """
+    r = _get_client().call("awslabs-aws-doc___read_documentation",
+                           {"url": url, "max_length": max_length, "start_index": start_index})
+    return _truncate(r or {}, max_chars=12000)
+
+
+@tool
+def aws_doc_recommend(url: str) -> str:
+    """특정 AWS docs 페이지와 관련된 추천 페이지 목록.
+
+    Args:
+        url: 기준이 될 AWS docs URL
+    """
+    r = _get_client().call("awslabs-aws-doc___recommend", {"url": url})
+    return _truncate(r or {})
+
+
+# ───────────────────────── awslabs aws-api MCP (call_aws fallback) ─────────────────────────
+
+
+@tool
+def aws_call_cli(cli_command: str) -> str:
+    """임의 AWS CLI read-only 명령 실행 (awslabs aws-api-mcp).
+
+    READ_OPERATIONS_ONLY=true 강제 — 변경/생성/삭제 명령 차단.
+    PoC 의 우리 aws-api Lambda 가 안 만든 AWS API 도 이 fallback 으로 호출 가능.
+
+    Args:
+        cli_command: 'aws sts get-caller-identity' 같은 완성된 CLI 한 줄
+    """
+    r = _get_client().call("awslabs-aws-api___call_aws", {"cli_command": cli_command})
+    return _truncate(r or {}, max_chars=12000)
+
+
+@tool
+def aws_suggest_cli(query: str) -> str:
+    """자연어 → AWS CLI 명령 추천 (awslabs aws-api-mcp).
+
+    Args:
+        query: '내 RDS 인스턴스 다 보여줘' 같은 자연어
+    """
+    r = _get_client().call("awslabs-aws-api___suggest_aws_commands", {"query": query})
+    return _truncate(r or {})
+
+
 # ───────────────────────── 그룹 헬퍼 ─────────────────────────
 
 
 AWS_TOOLS = [
+    # 우리 aws-api Lambda (응답 정제된 7개)
     aws_describe_rds_instances,
     aws_describe_rds_clusters,
     aws_describe_db_log_files,
     aws_download_db_log_file_portion,
     aws_list_msk_clusters,
     aws_describe_ec2_instances,
-    aws_list_cloudwatch_alarms,
-    aws_list_metric_namespaces,
     aws_describe_pi_dimensions,
+    # awslabs cloudwatch-mcp 의 알람
+    cloudwatch_get_active_alarms,
+    cloudwatch_get_alarm_history,
+    # awslabs aws-api-mcp fallback
+    aws_call_cli,
+    aws_suggest_cli,
 ]
 
-OS_TOOLS = [prometheus_query, cloudwatch_metric]
-DB_TOOLS = [sql_readonly, rds_performance_insights, msk_metric, cloudwatch_metric]
-LOG_TOOLS = [s3_list_logs, s3_log_fetch, aws_describe_db_log_files, aws_download_db_log_file_portion]
-QUERY_TOOLS = [explain_query, sql_readonly]
+OS_TOOLS = [
+    # community pab1it0 prometheus
+    prometheus_query,
+    prometheus_range_query,
+    # awslabs cloudwatch
+    cloudwatch_metric,
+]
+
+DB_TOOLS = [
+    # community postgres-mcp
+    pg_execute_sql,
+    pg_analyze_db_health,
+    pg_get_top_queries,
+    pg_list_schemas,
+    pg_list_objects,
+    # community mysql-mcp
+    mysql_query,
+    # 우리 PoC 특화
+    rds_performance_insights,
+    msk_metric,
+    # awslabs cloudwatch (RDS 메트릭 조회용으로 공유)
+    cloudwatch_metric,
+]
+
+LOG_TOOLS = [
+    # 우리 s3
+    s3_list_logs,
+    s3_log_fetch,
+    # 우리 aws-api 의 RDS 엔진 로그
+    aws_describe_db_log_files,
+    aws_download_db_log_file_portion,
+    # awslabs cloudwatch Logs Insights
+    cloudwatch_describe_log_groups,
+    cloudwatch_execute_log_insights_query,
+]
+
+QUERY_TOOLS = [
+    pg_explain_query,
+    pg_analyze_workload_indexes,
+    pg_execute_sql,
+    mysql_explain,
+    mysql_query,
+]
+
+DOCS_TOOLS = [
+    aws_doc_search,
+    aws_doc_read,
+    aws_doc_recommend,
+]
 
 
 def infra_context() -> dict[str, str]:

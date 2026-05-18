@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# 6개 MCP Lambda 컨테이너 이미지 빌드/push (linux/arm64).
+# MCP Lambda 컨테이너 이미지 빌드/push (linux/arm64).
+#
+# 우리 PoC 특화 (4개) + 기성 MCP wrap (6개) = 총 10개.
 set -euo pipefail
 
 REGION="${REGION:-ap-northeast-2}"
@@ -12,12 +14,24 @@ aws ecr get-login-password --region "${REGION}" | docker login --username AWS --
 ROOT="$(dirname "$0")/.."
 cd "${ROOT}/mcp_tools"
 
-TOOLS=(cloudwatch_metrics rds_pi sql_readonly msk_metrics s3_log_fetch aws_api)
-NAMES=(cloudwatch-metrics rds-pi sql-readonly msk-metrics s3-log-fetch aws-api)
+# (dir name, ECR repo suffix)
+TOOLS=(
+  rds_pi               rds-pi
+  msk_metrics          msk-metrics
+  s3_log_fetch         s3-log-fetch
+  aws_api              aws-api
+  awslabs_cloudwatch   awslabs-cloudwatch
+  awslabs_aws_doc      awslabs-aws-doc
+  awslabs_aws_api      awslabs-aws-api
+  community_prometheus community-prometheus
+  community_postgres   community-postgres
+  community_mysql      community-mysql
+)
 
-for i in "${!TOOLS[@]}"; do
+n=${#TOOLS[@]}
+for ((i=0; i<n; i+=2)); do
   tool="${TOOLS[$i]}"
-  name="${NAMES[$i]}"
+  name="${TOOLS[$((i+1))]}"
   echo "==> ${name} (from ${tool}/Dockerfile)"
   docker buildx build --platform linux/arm64 \
     -f "${tool}/Dockerfile" \
@@ -26,4 +40,4 @@ for i in "${!TOOLS[@]}"; do
     --push "${tool}"
 done
 
-echo "pushed 6 mcp images"
+echo "pushed $((n/2)) mcp images"

@@ -28,6 +28,13 @@ resource "aws_iam_role_policy_attachment" "mcp_lambda_vpc" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
+# awslabs aws-api-mcp 의 call_aws 가 임의 AWS CLI read 호출 — ReadOnlyAccess 부여.
+# READ_OPERATIONS_ONLY=true 로 mutation 은 핸들러 레벨에서 한 번 더 차단.
+resource "aws_iam_role_policy_attachment" "mcp_lambda_readonly" {
+  role       = aws_iam_role.mcp_lambda_base.name
+  policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
+}
+
 resource "aws_iam_role_policy" "mcp_lambda_runtime" {
   role = aws_iam_role.mcp_lambda_base.name
   policy = jsonencode({
@@ -39,7 +46,24 @@ resource "aws_iam_role_policy" "mcp_lambda_runtime" {
           "cloudwatch:GetMetricData",
           "cloudwatch:GetMetricStatistics",
           "cloudwatch:ListMetrics",
-          "cloudwatch:DescribeAlarms"
+          "cloudwatch:DescribeAlarms",
+          "cloudwatch:DescribeAlarmHistory"
+        ]
+        Resource = "*"
+      },
+      {
+        # awslabs cloudwatch-mcp 의 Logs Insights 도구 — describe / start / get / stop / list
+        Effect = "Allow"
+        Action = [
+          "logs:DescribeLogGroups",
+          "logs:DescribeQueryDefinitions",
+          "logs:StartQuery",
+          "logs:GetQueryResults",
+          "logs:StopQuery",
+          "logs:ListLogAnomalyDetectors",
+          "logs:ListAnomalies",
+          "logs:GetLogEvents",
+          "logs:FilterLogEvents"
         ]
         Resource = "*"
       },

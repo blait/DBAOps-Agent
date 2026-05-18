@@ -104,48 +104,19 @@ module "ecs_generators" {
 }
 
 ############################################
-# Phase 1 MCP Lambda — prometheus_query
-############################################
-
-module "lambda_prometheus_query" {
-  source = "../../modules/lambda_mcp"
-
-  environment = var.environment
-  tool_name   = "prometheus-query"
-  source_dir  = "${path.root}/../../../mcp_tools/prometheus_query"
-  handler     = "handler.handler"
-  timeout     = 30
-  memory_size = 256
-  vpc_id      = module.network.vpc_id
-  subnet_ids  = module.network.private_subnet_ids
-  role_arn    = module.iam.mcp_lambda_base_role_arn
-
-  env_vars = {
-    PROMETHEUS_URL = module.ec2_prometheus.prometheus_endpoint
-  }
-
-  extra_security_group_ids = []
-}
-
-############################################
-# Phase 2 MCP Lambdas — 5종 (컨테이너 이미지)
+# MCP Lambdas — 모든 컨테이너 이미지 기반
 ############################################
 # 흐름: 첫 apply 는 image_pushed=false 로 ECR repo 만 생성 → scripts/build_mcp_images.sh 로
 # 이미지 push → 두 번째 apply 에 image_pushed=true 로 함수 생성.
 # variable mcp_images_pushed 로 한꺼번에 토글한다.
+#
+# (구버전 lambda_prometheus_query / lambda_cloudwatch_metrics / lambda_sql_readonly
+#  은 awslabs / community MCP 서버로 대체되어 제거됨.)
 
-module "lambda_cloudwatch_metrics" {
-  source = "../../modules/lambda_mcp_image"
 
-  environment  = var.environment
-  tool_name    = "cloudwatch-metrics"
-  image_pushed = var.mcp_images_pushed
-  timeout      = 30
-  memory_size  = 512
-  vpc_id       = module.network.vpc_id
-  subnet_ids   = module.network.private_subnet_ids
-  role_arn     = module.iam.mcp_lambda_base_role_arn
-}
+############################################
+# 우리 PoC 특화 MCP (직접 작성)
+############################################
 
 module "lambda_rds_pi" {
   source = "../../modules/lambda_mcp_image"
@@ -158,30 +129,6 @@ module "lambda_rds_pi" {
   vpc_id       = module.network.vpc_id
   subnet_ids   = module.network.private_subnet_ids
   role_arn     = module.iam.mcp_lambda_base_role_arn
-}
-
-module "lambda_sql_readonly" {
-  source = "../../modules/lambda_mcp_image"
-
-  environment  = var.environment
-  tool_name    = "sql-readonly"
-  image_pushed = var.mcp_images_pushed
-  timeout      = 30
-  memory_size  = 512
-  vpc_id       = module.network.vpc_id
-  subnet_ids   = module.network.private_subnet_ids
-  role_arn     = module.iam.mcp_lambda_base_role_arn
-
-  env_vars = {
-    SQL_READONLY_PG_HOST       = replace(module.aurora_postgres.endpoint, "/:.*$/", "")
-    SQL_READONLY_PG_DBNAME     = module.aurora_postgres.database_name
-    SQL_READONLY_PG_SECRET_ARN = module.aurora_postgres.master_user_secret_arn
-    SQL_READONLY_MYSQL_HOST       = replace(module.rds_mysql.endpoint, "/:.*$/", "")
-    SQL_READONLY_MYSQL_DBNAME     = module.rds_mysql.database_name
-    SQL_READONLY_MYSQL_SECRET_ARN = module.rds_mysql.master_user_secret_arn
-    SQL_READONLY_MAX_ROWS         = "1000"
-    SQL_READONLY_TIMEOUT_MS       = "5000"
-  }
 }
 
 module "lambda_msk_metrics" {
@@ -227,4 +174,111 @@ module "lambda_aws_api" {
   vpc_id       = module.network.vpc_id
   subnet_ids   = module.network.private_subnet_ids
   role_arn     = module.iam.mcp_lambda_base_role_arn
+}
+
+
+############################################
+# 기성 MCP 서버 wrap (awslabs / community) — stdio MCP 를 Lambda 에서 spawn
+############################################
+
+# awslabs cloudwatch-mcp-server (16+ tools: 메트릭/알람/Logs Insights)
+module "lambda_awslabs_cloudwatch" {
+  source = "../../modules/lambda_mcp_image"
+
+  environment  = var.environment
+  tool_name    = "awslabs-cloudwatch"
+  image_pushed = var.mcp_images_pushed
+  timeout      = 60
+  memory_size  = 1024
+  vpc_id       = module.network.vpc_id
+  subnet_ids   = module.network.private_subnet_ids
+  role_arn     = module.iam.mcp_lambda_base_role_arn
+}
+
+# awslabs aws-documentation-mcp-server (4 tools, public docs.aws.amazon.com 호출)
+module "lambda_awslabs_aws_doc" {
+  source = "../../modules/lambda_mcp_image"
+
+  environment  = var.environment
+  tool_name    = "awslabs-aws-doc"
+  image_pushed = var.mcp_images_pushed
+  timeout      = 30
+  memory_size  = 512
+  vpc_id       = module.network.vpc_id
+  subnet_ids   = module.network.private_subnet_ids
+  role_arn     = module.iam.mcp_lambda_base_role_arn
+}
+
+# awslabs aws-api-mcp-server (call_aws / suggest_aws_commands — read-only mode)
+module "lambda_awslabs_aws_api" {
+  source = "../../modules/lambda_mcp_image"
+
+  environment  = var.environment
+  tool_name    = "awslabs-aws-api"
+  image_pushed = var.mcp_images_pushed
+  timeout      = 60
+  memory_size  = 1024
+  vpc_id       = module.network.vpc_id
+  subnet_ids   = module.network.private_subnet_ids
+  role_arn     = module.iam.mcp_lambda_base_role_arn
+}
+
+# pab1it0/prometheus-mcp-server — self-hosted EC2 Prometheus
+module "lambda_community_prometheus" {
+  source = "../../modules/lambda_mcp_image"
+
+  environment  = var.environment
+  tool_name    = "community-prometheus"
+  image_pushed = var.mcp_images_pushed
+  timeout      = 30
+  memory_size  = 512
+  vpc_id       = module.network.vpc_id
+  subnet_ids   = module.network.private_subnet_ids
+  role_arn     = module.iam.mcp_lambda_base_role_arn
+
+  env_vars = {
+    PROMETHEUS_URL = module.ec2_prometheus.prometheus_endpoint
+  }
+}
+
+# crystaldba/postgres-mcp (restricted RO mode) — Aurora PG via libpq
+module "lambda_community_postgres" {
+  source = "../../modules/lambda_mcp_image"
+
+  environment  = var.environment
+  tool_name    = "community-postgres"
+  image_pushed = var.mcp_images_pushed
+  timeout      = 60
+  memory_size  = 1024
+  vpc_id       = module.network.vpc_id
+  subnet_ids   = module.network.private_subnet_ids
+  role_arn     = module.iam.mcp_lambda_base_role_arn
+
+  env_vars = {
+    PG_HOST       = replace(module.aurora_postgres.endpoint, "/:.*$/", "")
+    PG_DBNAME     = module.aurora_postgres.database_name
+    PG_SECRET_ARN = module.aurora_postgres.master_user_secret_arn
+    PG_PORT       = "5432"
+  }
+}
+
+# benborla/mcp-server-mysql (RO default) — RDS MySQL via wire protocol
+module "lambda_community_mysql" {
+  source = "../../modules/lambda_mcp_image"
+
+  environment  = var.environment
+  tool_name    = "community-mysql"
+  image_pushed = var.mcp_images_pushed
+  timeout      = 60
+  memory_size  = 1024
+  vpc_id       = module.network.vpc_id
+  subnet_ids   = module.network.private_subnet_ids
+  role_arn     = module.iam.mcp_lambda_base_role_arn
+
+  env_vars = {
+    MYSQL_HOST       = replace(module.rds_mysql.endpoint, "/:.*$/", "")
+    MYSQL_DB         = module.rds_mysql.database_name
+    MYSQL_SECRET_ARN = module.rds_mysql.master_user_secret_arn
+    MYSQL_PORT       = "3306"
+  }
 }

@@ -18,6 +18,10 @@ output "prometheus_endpoint" {
   value = module.ec2_prometheus.prometheus_endpoint
 }
 
+output "prometheus_instance_id" {
+  value = module.ec2_prometheus.instance_id
+}
+
 output "aurora_endpoint" {
   value = module.aurora_postgres.endpoint
 }
@@ -48,10 +52,6 @@ output "agentcore_runtime_role_arn" {
 
 output "agentcore_gateway_role_arn" {
   value = module.agentcore.gateway_role_arn
-}
-
-output "prometheus_query_lambda_arn" {
-  value = module.lambda_prometheus_query.function_arn
 }
 
 output "mysql_endpoint" {
@@ -90,16 +90,8 @@ output "log_gen_repo_url" {
   value = module.ecs_generators.log_gen_repo_url
 }
 
-output "mcp_repo_cloudwatch_metrics" {
-  value = module.lambda_cloudwatch_metrics.ecr_repository_url
-}
-
 output "mcp_repo_rds_pi" {
   value = module.lambda_rds_pi.ecr_repository_url
-}
-
-output "mcp_repo_sql_readonly" {
-  value = module.lambda_sql_readonly.ecr_repository_url
 }
 
 output "mcp_repo_msk_metrics" {
@@ -114,14 +106,43 @@ output "mcp_repo_aws_api" {
   value = module.lambda_aws_api.ecr_repository_url
 }
 
+output "mcp_repo_awslabs_cloudwatch" {
+  value = module.lambda_awslabs_cloudwatch.ecr_repository_url
+}
+
+output "mcp_repo_awslabs_aws_doc" {
+  value = module.lambda_awslabs_aws_doc.ecr_repository_url
+}
+
+output "mcp_repo_awslabs_aws_api" {
+  value = module.lambda_awslabs_aws_api.ecr_repository_url
+}
+
+output "mcp_repo_community_prometheus" {
+  value = module.lambda_community_prometheus.ecr_repository_url
+}
+
+output "mcp_repo_community_postgres" {
+  value = module.lambda_community_postgres.ecr_repository_url
+}
+
+output "mcp_repo_community_mysql" {
+  value = module.lambda_community_mysql.ecr_repository_url
+}
+
 output "mcp_lambda_arns" {
   value = {
-    "prometheus-query"   = module.lambda_prometheus_query.function_arn
-    "cloudwatch-metrics" = module.lambda_cloudwatch_metrics.function_arn
-    "rds-pi"             = module.lambda_rds_pi.function_arn
-    "sql-readonly"       = module.lambda_sql_readonly.function_arn
-    "msk-metrics"        = module.lambda_msk_metrics.function_arn
-    "s3-log-fetch"       = module.lambda_s3_log_fetch.function_arn
-    "aws-api"            = module.lambda_aws_api.function_arn
+    # 우리 PoC 특화 (유지)
+    "rds-pi"               = module.lambda_rds_pi.function_arn
+    "msk-metrics"          = module.lambda_msk_metrics.function_arn
+    "s3-log-fetch"         = module.lambda_s3_log_fetch.function_arn
+    "aws-api"              = module.lambda_aws_api.function_arn
+    # 기성 MCP 서버 wrap
+    "awslabs-cloudwatch"   = module.lambda_awslabs_cloudwatch.function_arn
+    "awslabs-aws-doc"      = module.lambda_awslabs_aws_doc.function_arn
+    "awslabs-aws-api"      = module.lambda_awslabs_aws_api.function_arn
+    "community-prometheus" = module.lambda_community_prometheus.function_arn
+    "community-postgres"   = module.lambda_community_postgres.function_arn
+    "community-mysql"      = module.lambda_community_mysql.function_arn
   }
 }

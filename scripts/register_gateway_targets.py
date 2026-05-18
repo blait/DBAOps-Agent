@@ -165,32 +165,113 @@ def list_targets(client, gateway_id: str) -> list[dict]:
     return out
 
 
-_DROP_KEYS = {"default", "enum", "format", "minLength", "maxLength", "minimum", "maximum", "additionalProperties", "minItems", "maxItems"}
+_DROP_KEYS = {
+    "default", "enum", "format", "minLength", "maxLength", "minimum", "maximum",
+    "additionalProperties", "minItems", "maxItems",
+    # awslabs MCP 서버는 pydantic 의 JSON Schema 풀스펙을 쓰는데 Gateway 가 거부:
+    "title", "oneOf", "allOf",
+    "examples", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+    "pattern", "patternProperties", "uniqueItems", "const",
+    "readOnly", "writeOnly", "deprecated",
+}
 
 
-def _sanitize_schema(node: Any) -> Any:
-    """AgentCore inputSchema 가 거부하는 키만 제거한다.
-    type/properties/required/items/description 등 핵심 키는 보존.
+# AgentCore inputSchema 의 valid type 집합. anyOf 풀어 평탄화할 때 필요.
+_VALID_TYPES = {"object", "array", "string", "number", "integer", "boolean", "null"}
+
+
+def _resolve_refs(node: Any, defs: dict) -> Any:
+    """$ref 를 $defs 의 실제 정의로 inline 치환. $defs / $ref 키 자체는 제거.
+
+    pydantic 이 list[Dimension] → items: {$ref: '#/$defs/Dimension'} + $defs 로
+    표현하는 형태를 풀어준다.
     """
     if isinstance(node, dict):
+        if "$ref" in node and isinstance(node["$ref"], str):
+            ref = node["$ref"]
+            # '#/$defs/<Name>' 형식만 지원
+            if ref.startswith("#/$defs/"):
+                name = ref[len("#/$defs/"):]
+                resolved = defs.get(name) or {}
+                # ref 외 다른 키가 같이 있으면 merge
+                merged = {**resolved, **{k: v for k, v in node.items() if k != "$ref"}}
+                return _resolve_refs(merged, defs)
+            return {k: v for k, v in node.items() if k != "$ref"}
+        return {k: _resolve_refs(v, defs) for k, v in node.items() if k != "$defs"}
+    if isinstance(node, list):
+        return [_resolve_refs(x, defs) for x in node]
+    return node
+
+
+def _flatten_anyof(node: dict) -> dict:
+    """pydantic 이 Optional[T] 를 'anyOf: [T, null]' 로 표현하는데 Gateway 는 anyOf 거부.
+    가장 첫 번째 non-null type 만 남기고 평탄화.
+    """
+    if "anyOf" in node and isinstance(node["anyOf"], list):
+        for branch in node["anyOf"]:
+            if isinstance(branch, dict) and branch.get("type") in _VALID_TYPES and branch.get("type") != "null":
+                merged = {**branch, **{k: v for k, v in node.items() if k != "anyOf"}}
+                return merged
+        # fallback — 첫 번째 branch
+        first = node["anyOf"][0] if node["anyOf"] else {}
+        merged = {**(first if isinstance(first, dict) else {}),
+                  **{k: v for k, v in node.items() if k != "anyOf"}}
+        return merged
+    return node
+
+
+def _sanitize_inner(node: Any) -> Any:
+    if isinstance(node, dict):
+        node = _flatten_anyof(node)
         out: dict = {}
         for k, v in node.items():
             if k in _DROP_KEYS:
                 continue
-            out[k] = _sanitize_schema(v)
+            out[k] = _sanitize_inner(v)
+        # type 이 빠진 properties 의 leaf 는 default type 부여 (Gateway 가 type 강제)
+        if "properties" in out and isinstance(out["properties"], dict):
+            for pname, pdef in out["properties"].items():
+                if isinstance(pdef, dict) and "type" not in pdef:
+                    if "properties" in pdef:
+                        pdef["type"] = "object"
+                    elif "items" in pdef:
+                        pdef["type"] = "array"
+                    else:
+                        pdef["type"] = "string"
+        # items 가 dict 인데 type 빠지면 'object' 부여
+        if "items" in out and isinstance(out["items"], dict) and "type" not in out["items"]:
+            if "properties" in out["items"]:
+                out["items"]["type"] = "object"
+            else:
+                out["items"]["type"] = "string"
         return out
     if isinstance(node, list):
-        return [_sanitize_schema(x) for x in node]
+        return [_sanitize_inner(x) for x in node]
     return node
 
 
+def _sanitize_schema(node: Any) -> Any:
+    """1) $defs / $ref 를 inline 치환  2) Gateway 가 거부하는 키 제거 + anyOf 평탄화."""
+    defs: dict = {}
+    if isinstance(node, dict) and isinstance(node.get("$defs"), dict):
+        defs = node["$defs"]
+    resolved = _resolve_refs(node, defs)
+    return _sanitize_inner(resolved)
+
+
 def schema_to_tool_def(spec: dict) -> dict:
-    """tool_io.json 을 AgentCore inlinePayload tool 정의로 변환."""
+    """tool_io.json 을 AgentCore inlinePayload tool 정의로 변환.
+
+    `input_schema` (snake_case, 우리 양식) 와 `inputSchema` (camelCase,
+    MCP `tools/list` 응답) 둘 다 지원.
+    """
+    in_schema  = spec.get("input_schema") or spec.get("inputSchema") or {"type": "object"}
+    out_schema = spec.get("output_schema") or spec.get("outputSchema") or {"type": "object"}
     return {
         "name": spec["name"],
         "description": spec.get("description", spec["name"]),
-        "inputSchema": _sanitize_schema(spec.get("input_schema") or {"type": "object"}),
-        "outputSchema": _sanitize_schema(spec.get("output_schema") or {"type": "object"}),
+        "inputSchema":  _sanitize_schema(in_schema),
+        "outputSchema": _sanitize_schema(out_schema),
     }
 
 
@@ -277,14 +358,24 @@ def upsert_runtime(client, role_arn: str, ecr_uri: str, gateway_endpoint: str) -
 
 _TOOL_TARGETS = [
     # (target_name, tool_io.json 경로, terraform output key for lambda arn)
-    ("prometheus-query",   "prometheus_query/tool_io.json",   "prometheus-query"),
-    ("cloudwatch-metrics", "cloudwatch_metrics/tool_io.json", "cloudwatch-metrics"),
-    ("rds-pi",             "rds_pi/tool_io.json",             "rds-pi"),
-    ("sql-readonly",       "sql_readonly/tool_io.json",       "sql-readonly"),
-    ("msk-metrics",        "msk_metrics/tool_io.json",        "msk-metrics"),
-    ("s3-log-fetch",       "s3_log_fetch/tool_io.json",       "s3-log-fetch"),
-    ("aws-api",            "aws_api/tool_io.json",            "aws-api"),
+    # 우리 PoC 특화 (직접 작성)
+    ("rds-pi",               "rds_pi/tool_io.json",               "rds-pi"),
+    ("msk-metrics",          "msk_metrics/tool_io.json",          "msk-metrics"),
+    ("s3-log-fetch",         "s3_log_fetch/tool_io.json",         "s3-log-fetch"),
+    ("aws-api",              "aws_api/tool_io.json",              "aws-api"),
+    # 기성 MCP 서버 wrap (awslabs)
+    ("awslabs-cloudwatch",   "awslabs_cloudwatch/tool_io.json",   "awslabs-cloudwatch"),
+    ("awslabs-aws-doc",      "awslabs_aws_doc/tool_io.json",      "awslabs-aws-doc"),
+    ("awslabs-aws-api",      "awslabs_aws_api/tool_io.json",      "awslabs-aws-api"),
+    # 기성 MCP 서버 wrap (community)
+    ("community-prometheus", "community_prometheus/tool_io.json", "community-prometheus"),
+    ("community-postgres",   "community_postgres/tool_io.json",   "community-postgres"),
+    ("community-mysql",      "community_mysql/tool_io.json",      "community-mysql"),
 ]
+
+
+# 폐기된 target — 등록 시 자동 삭제
+_DEPRECATED_TARGETS = ("prometheus-query", "cloudwatch-metrics", "sql-readonly")
 
 
 def load_tool_specs(spec_path: Path) -> list[dict]:
@@ -321,6 +412,7 @@ def upsert_runtime_with_auth(
     cognito_client_secret: str,
     log_bucket: str = "",
     prom_endpoint: str = "",
+    prom_instance_id: str = "",
 ) -> dict | None:
     image_uri = f"{ecr_uri}:latest"
     cfg = {"containerConfiguration": {"containerUri": image_uri}}
@@ -347,7 +439,7 @@ def upsert_runtime_with_auth(
         "COGNITO_CLIENT_SECRET": cognito_client_secret,
         "COGNITO_SCOPE":         "dbaops-gateway/invoke",
         # 인프라 컨텍스트 — os/db plan LLM 이 정확한 CW dimensions 를 만들 때 사용
-        "INFRA_PROM_INSTANCE_ID":  os.environ.get("INFRA_PROM_INSTANCE_ID", ""),
+        "INFRA_PROM_INSTANCE_ID":  prom_instance_id or os.environ.get("INFRA_PROM_INSTANCE_ID", ""),
         "INFRA_AURORA_CLUSTER_ID": "dbaops-poc-aurora-pg",
         "INFRA_AURORA_WRITER_ID":  "dbaops-poc-aurora-pg-writer",
         "INFRA_AURORA_READER_ID":  "dbaops-poc-aurora-pg-reader",
@@ -401,6 +493,17 @@ def main(argv: list[str]) -> int:
     logger.info("gateway id=%s url=%s", gw_id, gw_url)
 
     if not args.skip_targets:
+        # 폐기된 target 자동 삭제 (prometheus-query / cloudwatch-metrics / sql-readonly).
+        existing_targets = list_targets(ac, gw_id)
+        for t in existing_targets:
+            if t.get("name") in _DEPRECATED_TARGETS:
+                tid = t.get("targetId")
+                logger.info("deleting deprecated target %s (%s)", t["name"], tid)
+                try:
+                    ac.delete_gateway_target(gatewayIdentifier=gw_id, targetId=tid)
+                except ClientError as e:
+                    logger.warning("delete_gateway_target failed: %s", e)
+
         for target_name, tool_io_path, lambda_key in _TOOL_TARGETS:
             spec_path = TOOLS_DIR / tool_io_path
             arn = lambda_arns.get(lambda_key)
@@ -431,6 +534,7 @@ def main(argv: list[str]) -> int:
                 client_secret,
                 log_bucket=outputs.get("logs_bucket", "") or "",
                 prom_endpoint=outputs.get("prometheus_endpoint", "") or "",
+                prom_instance_id=outputs.get("prometheus_instance_id", "") or "",
             )
         except ClientError as e:
             logger.error("agent runtime upsert failed: %s", e)

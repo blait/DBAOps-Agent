@@ -77,6 +77,9 @@ def _render_task_card(task_id: str) -> None:
         if st.button("🗑 추적 해제", key=f"untrack-{task_id}"):
             tracked = st.session_state.get("tracked_tasks") or []
             st.session_state["tracked_tasks"] = [t for t in tracked if t != task_id]
+            owners = st.session_state.get("task_owner") or {}
+            owners.pop(task_id, None)
+            st.session_state["task_owner"] = owners
             st.rerun()
         return
 
@@ -107,6 +110,9 @@ def _render_task_card(task_id: str) -> None:
                 if st.button("🗑 추적 해제", key=f"untrack-{task_id}", use_container_width=True):
                     tracked = st.session_state.get("tracked_tasks") or []
                     st.session_state["tracked_tasks"] = [t for t in tracked if t != task_id]
+                    owners = st.session_state.get("task_owner") or {}
+                    owners.pop(task_id, None)
+                    st.session_state["task_owner"] = owners
                     # 로그 버퍼도 정리
                     for k in list(st.session_state.keys()):
                         if k.endswith(f":{task_id}"):
@@ -137,6 +143,22 @@ def _render_task_card(task_id: str) -> None:
 _CATEGORY_LABEL = {
     "data": ("⚡ 데이터 부하 시나리오", "PG / MySQL / Kafka 에 직접 부하를 주입합니다."),
     "log":  ("📒 로그 burst 시나리오",  "S3 에 의도된 패턴의 에러/슬로우 로그를 빠르게 적재합니다."),
+}
+
+
+# lens → supervisor 매핑 (3 supervisor 구조)
+def _supervisor_for_lens(lens: str | None) -> str:
+    if lens == "log":
+        return "log"
+    if lens == "os":
+        return "os_metric"
+    return "db_metric"
+
+
+_SUPERVISOR_LABEL = {
+    "os_metric": "🖥️ OS·인프라 메트릭 분석",
+    "db_metric": "🗄️ DB 성능 메트릭 분석",
+    "log":       "📜 로그 분석",
 }
 
 
@@ -178,8 +200,10 @@ def _render_scenario_card(sc: dict, *, subnets: list[str], sgs: list[str]) -> No
         # 추천 분석 prompt
         prompt = sc.get("suggested_prompt")
         lens = sc.get("suggested_lens") or "multi"
+        sup = _supervisor_for_lens(lens)
+        sup_label = _SUPERVISOR_LABEL.get(sup, sup)
         if prompt:
-            st.markdown(f"**💬 추천 분석 요청** · lens=`{lens}`")
+            st.markdown(f"**💬 추천 분석 요청** · 추천 supervisor: **{sup_label}**")
             st.code(prompt, language="text")
 
         # 액션 버튼
@@ -211,6 +235,10 @@ def _render_scenario_card(sc: dict, *, subnets: list[str], sgs: list[str]) -> No
                     if res["task_id"] not in tasks:
                         tasks.append(res["task_id"])
                         st.session_state["tracked_tasks"] = tasks
+                    # task → scenario 소유 매핑 — 카드 안에서 라이브 모니터 그릴 때 사용
+                    owners = st.session_state.get("task_owner") or {}
+                    owners[res["task_id"]] = sc["key"]
+                    st.session_state["task_owner"] = owners
                     st.toast(
                         f"started {res['family']} · task {res['task_id'][:10]}",
                         icon="▶",
@@ -225,8 +253,19 @@ def _render_scenario_card(sc: dict, *, subnets: list[str], sgs: list[str]) -> No
             st.session_state["chat_prefill"] = {
                 "free_text": prompt,
                 "lens": lens,
+                "supervisor": sup,
             }
-            st.toast("분석 채팅 탭의 입력창에 prefill 했습니다.", icon="💬")
+            st.toast(f"{sup_label} 탭에 prefill 했습니다.", icon="💬")
+
+        # 이 시나리오가 trigger 한 task 들의 라이브 모니터 — 카드 안에 인라인 표시
+        owners = st.session_state.get("task_owner") or {}
+        tracked = st.session_state.get("tracked_tasks") or []
+        owned = [t for t in tracked if owners.get(t) == sc["key"]]
+        if owned:
+            st.markdown("---")
+            st.markdown("**📺 이 시나리오의 실행 모니터**")
+            for tid in owned:
+                _render_task_card(tid)
 
 
 def _render_trigger_panel() -> None:
@@ -249,16 +288,15 @@ def _render_trigger_panel() -> None:
         st.markdown(f"### {title}")
         if hint:
             st.caption(hint)
-        # 2열 grid
-        cols = st.columns(2)
-        for i, sc in enumerate(items):
-            with cols[i % 2]:
-                _render_scenario_card(sc, subnets=subnets, sgs=sgs)
+        # 1열 — 한 행에 하나씩 좌우로 길게
+        for sc in items:
+            _render_scenario_card(sc, subnets=subnets, sgs=sgs)
 
 
 def render(autorefresh_sec: int = 5) -> None:
     """Generators 탭 메인."""
     tracked: list[str] = st.session_state.get("tracked_tasks") or []
+    owners: dict[str, str] = st.session_state.get("task_owner") or {}
 
     # ── 트리거 패널 (탭 상단) ──
     _render_trigger_panel()
@@ -267,17 +305,20 @@ def render(autorefresh_sec: int = 5) -> None:
 
     # ── 라이브 모니터 헤더 ──
     head_cols = st.columns([3, 1, 1])
-    head_cols[0].markdown("#### 📺 라이브 모니터")
+    head_cols[0].markdown("#### 📺 외부 trigger / 미매핑 task 모니터")
     auto = head_cols[1].toggle("자동 새로고침", value=True, key="gen-auto")
     if head_cols[2].button("🔄 새로고침", use_container_width=True):
         st.rerun()
     st.caption(
-        "트리거된 task 는 자동 등록됩니다. STOPPED 가 되어도 로그/상태는 남고, "
-        "카드의 🗑 버튼으로 추적 해제할 수 있습니다."
+        "시나리오 버튼으로 띄운 task 는 해당 시나리오 카드 안에서 모니터링됩니다. "
+        "이 영역은 외부 trigger 또는 직접 추적한 task 만 보여집니다."
     )
 
-    if not tracked:
-        st.info("추적 중인 task 없음. 위 시나리오 버튼으로 시작하세요.")
+    # owner 가 있는 task 는 카드 안에서 이미 그렸으니 여기선 제외
+    unowned = [t for t in tracked if t not in owners]
+
+    if not unowned:
+        st.caption("추적 중인 미매핑 task 없음.")
 
     # 사용자가 직접 task_id 추적 (수동 외부 trigger 케이스)
     with st.expander("➕ 다른 task_id 직접 추적"):
@@ -290,8 +331,8 @@ def render(autorefresh_sec: int = 5) -> None:
             st.session_state["manual-track-input"] = ""
             st.rerun()
 
-    # 추적 카드들
-    for tid in tracked:
+    # unowned 카드들
+    for tid in unowned:
         _render_task_card(tid)
 
     # 그 외 RUNNING task 도 보여주기 (정보용)

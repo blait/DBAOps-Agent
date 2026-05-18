@@ -1,4 +1,4 @@
-"""DBAOps-Agent Streamlit chat UI — fast/swarm/hybrid + 멀티턴 + 시나리오 라이브 모니터."""
+"""DBAOps-Agent Streamlit chat UI — 3 supervisor 탭 + 시나리오 라이브 모니터."""
 
 from __future__ import annotations
 
@@ -8,111 +8,132 @@ from datetime import datetime, timedelta, timezone
 
 import streamlit as st
 
-import ecs_client
 from agentcore_client import invoke_stream as agentcore_invoke_stream
-from components import view_fast_stream, view_generators, view_swarm
-from components.view_fast_stream import _evidence_chip
+from components import view_generators, view_swarm
 
 st.set_page_config(page_title="DBAOps-Agent", layout="wide")
 st.title("DBAOps-Agent")
-st.caption("LangGraph + AgentCore — OS / DB / Log / Query 분석 (chat) + 시나리오 라이브 모니터")
+st.caption("LangGraph + AgentCore — 3 Supervisor (OS·인프라 / DB 성능 / 로그) + 시나리오 라이브 모니터")
 
 # ───────────────────────── 세션 상태 ─────────────────────────
-if "history" not in st.session_state:
-    st.session_state["history"] = []
-if "session_id" not in st.session_state:
-    st.session_state["session_id"] = str(uuid.uuid4())[:8]
+SUPERVISORS: list[dict] = [
+    {
+        "key":   "os_metric",
+        "label": "🖥️ OS·인프라 메트릭 분석",
+        "tab":   "🖥️ OS·인프라 메트릭",
+        "responsibility": "OS·호스트 레이어 메트릭(CPU/메모리/디스크/네트워크) 추세·이상 탐지·임계치 도달 시점 분석",
+        "input_hint":     "주요 입력: 시간 범위",
+        "deliverable":    "산출물: 메트릭 추세 + 이상 지점 + 가설",
+        "example":        "예: 'EC2 prometheus 의 최근 1시간 CPU peak 시점과 baseline 대비 격차 분석'",
+        "mode":           "swarm",
+    },
+    {
+        "key":   "db_metric",
+        "label": "🗄️ DB 성능 메트릭 분석",
+        "tab":   "🗄️ DB 성능 메트릭",
+        "responsibility": "DBMS·Kafka 클러스터 내부 성능 메트릭 정량 분석 (TPS/QPS/Lock/Cache hit/Lag/ISR)",
+        "input_hint":     "주요 입력: 시간 범위",
+        "deliverable":    "산출물: TPS·QPS·Lock·Cache hit·Lag·ISR 추세 + 비정상 패턴 + 가설",
+        "example":        "예: 'MySQL slow_log 최근 30분 TOP 5 / Kafka dbaops.orders consumer lag 추세'",
+        "mode":           "swarm",
+    },
+    {
+        "key":   "log",
+        "label": "📜 로그 분석",
+        "tab":   "📜 로그 분석",
+        "responsibility": "Error/Slow/Audit/시스템 로그 패턴 분류, 빈발 에러 탐지, RCA 후보 도출",
+        "input_hint":     "주요 입력: 시간 범위 / 키워드",
+        "deliverable":    "산출물: 에러 분류 + 빈발 패턴 + RCA 후보 + 추가 확인 필요 항목",
+        "example":        "예: 'Aurora PG 최근 1시간 deadlock / FATAL 빈도와 시간 분포'",
+        "mode":           "swarm",
+    },
+    {
+        "key":   "single",
+        "label": "🧠 단일 에이전트 (RCA)",
+        "tab":   "🧠 단일 에이전트",
+        "responsibility": "한 명의 RCA 분석가가 모든 도구 (OS/DB/로그/EXPLAIN/AWS/Docs) 를 직접 사용. handoff 없음, 카테고리 경계 없음.",
+        "input_hint":     "주요 입력: 시간 범위 + 자연어 질문 (단순 조회부터 cross-domain RCA 까지)",
+        "deliverable":    "산출물: 분류 + 발견 사실(인용 포함) + 가설(hedging) + 권고",
+        "example":        "예: 'Aurora 최근 1시간 어디서 병목이 났는지 메트릭/로그/PI 종합해서 분석'",
+        "mode":           "single",
+    },
+]
+
+for s in SUPERVISORS:
+    h_key = f"history__{s['key']}"
+    sid_key = f"session_id__{s['key']}"
+    if h_key not in st.session_state:
+        st.session_state[h_key] = []
+    if sid_key not in st.session_state:
+        st.session_state[sid_key] = str(uuid.uuid4())[:8]
 if "tracked_tasks" not in st.session_state:
-    st.session_state["tracked_tasks"] = []   # list[str]: 추적 중인 ECS task_id
-
-
-def _track_task(task_id: str) -> None:
-    tasks = st.session_state.get("tracked_tasks") or []
-    if task_id not in tasks:
-        tasks.append(task_id)
-    st.session_state["tracked_tasks"] = tasks
+    st.session_state["tracked_tasks"] = []
 
 
 # ───────────────────────── Sidebar ─────────────────────────
 with st.sidebar:
     st.markdown("### 분석 옵션")
-    mode = st.radio(
-        "모드",
-        options=["fast", "swarm", "hybrid"],
-        format_func=lambda v: {
-            "fast":   "⚡ Fast (정해진 그래프)",
-            "swarm":  "🐝 Swarm (specialist 자율)",
-            "hybrid": "🔬 Hybrid (Fast→Swarm)",
-        }[v],
-        index=0,
-        horizontal=False,
-    )
-    lens = st.selectbox("lens", ["multi", "os", "db", "log", "query", "aws"], index=0)
+    st.caption("⏱ 시간 범위 (UTC) — default 최근 1시간")
     now = datetime.now(timezone.utc)
     default_start = now - timedelta(hours=1)
     start = st.text_input("Start (UTC)", default_start.isoformat(timespec="seconds"))
     end = st.text_input("End (UTC)", now.isoformat(timespec="seconds"))
-    targets = st.text_input("대상 (콤마 구분)", "ec2-prometheus")
+
+    if st.button("⏱ 최근 1시간으로 초기화", use_container_width=True):
+        n = datetime.now(timezone.utc)
+        st.session_state["__start_reset"] = (n - timedelta(hours=1)).isoformat(timespec="seconds")
+        st.session_state["__end_reset"]   = n.isoformat(timespec="seconds")
+        st.rerun()
+    if "__start_reset" in st.session_state:
+        start = st.session_state.pop("__start_reset")
+    if "__end_reset" in st.session_state:
+        end = st.session_state.pop("__end_reset")
 
     st.divider()
     use_prev_context = st.toggle(
         "이전 답변을 다음 요청에 컨텍스트로 사용",
         value=True,
-        help="이전 turn 의 findings/hypotheses 를 swarm/hybrid 의 fast_context 로 자동 주입.",
+        help="직전 turn 의 supervisor 응답을 다음 요청 hint 로 자동 주입.",
     )
 
     st.divider()
-    if st.button("🗑 대화 초기화", use_container_width=True):
-        st.session_state["history"] = []
-        st.session_state["session_id"] = str(uuid.uuid4())[:8]
+    if st.button("🗑 모든 supervisor 대화 초기화", use_container_width=True):
+        for s in SUPERVISORS:
+            st.session_state[f"history__{s['key']}"] = []
+            st.session_state[f"session_id__{s['key']}"] = str(uuid.uuid4())[:8]
         st.rerun()
 
     runtime_arn = os.environ.get("AGENTCORE_RUNTIME_ARN", "")
     st.caption(f"runtime: `{runtime_arn.rsplit('/',1)[-1] or '(unset)'}`")
-    st.caption(f"session: `{st.session_state['session_id']}`")
+    for s in SUPERVISORS:
+        st.caption(f"{s['tab']} session: `{st.session_state[f'session_id__{s['key']}']}`")
     st.caption("🧪 시나리오 트리거는 **시나리오 라이브 모니터** 탭으로 이동했습니다.")
 
 
-# ───────────────────────── 메시지 히스토리 헬퍼 ─────────────────────────
-def _build_fast_context_from_history() -> dict:
-    if not st.session_state["history"]:
+# ───────────────────────── 직전 컨텍스트 헬퍼 ─────────────────────────
+def _build_prev_context(sup_key: str) -> dict:
+    history = st.session_state.get(f"history__{sup_key}") or []
+    if not history:
         return {}
-    last = st.session_state["history"][-1]
-    rep = last.get("report") or {}
+    last = history[-1]
     sw = last.get("swarm") or {}
-
-    findings = list(rep.get("findings") or [])
-    hypotheses = list(rep.get("hypotheses") or [])
-    next_actions = list(rep.get("next_actions") or [])
-
-    if not findings and sw.get("messages"):
-        for m in reversed(sw["messages"]):
-            if m.get("role") == "ai" and not (m.get("tool_calls") or []) and (m.get("text") or "").strip():
-                hypotheses.append({
-                    "confidence": 0.5,
-                    "statement": (m.get("text") or "")[:1500],
-                    "supporting_finding_ids": [],
-                })
-                break
-
-    return {
-        "findings": findings[:30],
-        "hypotheses": hypotheses[:10],
-        "next_actions": next_actions[:10],
-    }
+    if not sw.get("messages"):
+        return {}
+    for m in reversed(sw["messages"]):
+        if m.get("role") == "ai" and not (m.get("tool_calls") or []) and (m.get("text") or "").strip():
+            return {"hypotheses": [{
+                "confidence": 0.5,
+                "statement":  (m.get("text") or "")[:1500],
+                "supporting_finding_ids": [],
+            }]}
+    return {}
 
 
 def _summarize_turn(turn: dict) -> str:
-    rep = turn.get("report") or {}
     sw = turn.get("swarm") or {}
     bits: list[str] = []
-    bits.append(f"`{turn.get('mode','?')}`")
-    if rep:
-        f = len(rep.get("findings") or [])
-        h = len(rep.get("hypotheses") or [])
-        bits.append(f"fast: finding {f} · hypothesis {h}")
     if sw and sw.get("messages"):
-        bits.append(f"swarm: msg {len(sw['messages'])} · handoff {max(0, len(sw.get('handoffs') or []) - 1)}")
+        bits.append(f"msg {len(sw['messages'])} · handoff {max(0, len(sw.get('handoffs') or []) - 1)}")
     elapsed = turn.get("elapsed")
     if elapsed:
         bits.append(f"⏱ {elapsed:.1f}s")
@@ -120,154 +141,117 @@ def _summarize_turn(turn: dict) -> str:
 
 
 # ───────────────────────── 메인 탭 ─────────────────────────
-tab_chat, tab_gen = st.tabs(["💬 분석 채팅", "🧪 시나리오 라이브 모니터"])
+chat_tab_labels = [s["tab"] for s in SUPERVISORS] + ["🧪 시나리오 라이브 모니터"]
+chat_tabs = st.tabs(chat_tab_labels)
 
 
-# ── 채팅 탭 ──
-with tab_chat:
-    # 히스토리 렌더
-    for turn in st.session_state["history"]:
+def _render_supervisor_tab(s: dict) -> None:
+    sup_key = s["key"]
+    h_key = f"history__{sup_key}"
+    sid_key = f"session_id__{sup_key}"
+
+    with st.container(border=True):
+        st.markdown(f"### {s['label']}")
+        st.markdown(f"**핵심 책임**: {s['responsibility']}")
+        st.caption(s["input_hint"])
+        st.caption(s["deliverable"])
+        st.caption(s["example"])
+
+    history = st.session_state.get(h_key) or []
+    for turn in history:
         with st.chat_message("user", avatar="🙋"):
             st.markdown(turn.get("free_text") or "_(empty)_")
             st.caption(
-                f"mode=`{turn.get('mode','?')}` · lens=`{turn.get('lens','?')}` · "
-                f"window {turn.get('start','?')[:19]} → {turn.get('end','?')[:19]} · "
-                f"targets: {', '.join(turn.get('targets') or []) or '—'}"
+                f"window {turn.get('start','?')[:19]} → {turn.get('end','?')[:19]}"
             )
 
         with st.chat_message("assistant", avatar="🤖"):
             st.caption(_summarize_turn(turn))
-            rep = turn.get("report") or {}
-            if rep:
-                with st.expander("📋 1차 (Fast) 결과", expanded=False):
-                    findings = rep.get("findings") or []
-                    for f in findings[:15]:
-                        sev = (f.get("severity") or "info").upper()
-                        badge = {"ERROR": "🟥", "WARN": "🟧", "INFO": "🟦"}.get(sev, "•")
-                        st.markdown(f"- {badge} `[{sev}]` `{f.get('domain','?')}` · {f.get('title','')}")
-                        for ev in (f.get("evidence") or [])[:2]:
-                            chip = _evidence_chip(ev)
-                            if chip:
-                                st.caption("　└ " + chip)
-                    hyps = rep.get("hypotheses") or []
-                    if hyps:
-                        st.markdown("**가설**")
-                        for h in hyps[:5]:
-                            c = h.get("confidence", 0.0) or 0.0
-                            st.markdown(f"- conf {c:.2f} — {h.get('statement','')}")
-
             sw = turn.get("swarm") or {}
             if sw:
-                with st.expander("🐝 Swarm 대화 / 최종 정리", expanded=bool(sw and not rep)):
+                with st.expander("🐝 Supervisor 대화 / 최종 정리", expanded=True):
                     view_swarm.render(sw, request={
-                        "lens":       turn.get("lens"),
-                        "targets":    turn.get("targets"),
+                        "supervisor": sup_key,
                         "free_text":  turn.get("free_text"),
                         "time_range": {"start": turn.get("start"), "end": turn.get("end")},
                     })
 
-    # 시나리오 카드의 "💬 채팅에 보내기" 가 채워둔 prefill 이 있으면 보여 주기
-    prefill = st.session_state.pop("chat_prefill", None)
-    if prefill:
+    prefill = st.session_state.get("chat_prefill")
+    if prefill and prefill.get("supervisor") == sup_key:
+        st.session_state.pop("chat_prefill", None)
         st.info(
-            f"📋 시나리오에서 가져온 추천 prompt 가 준비됐습니다 (lens=`{prefill.get('lens','?')}`).  \n"
+            f"📋 시나리오 추천 prompt 가 준비됐습니다.  \n"
             f"`{prefill.get('free_text','')}`  \n"
             f"채팅 입력창에 붙여 넣고 Enter 만 치면 분석이 시작됩니다."
         )
-        # session_state 에 한 번 더 보존 — 사용자가 즉시 누를 수 있도록
-        st.session_state["chat_prefill_pending"] = prefill
+        st.session_state[f"chat_prefill_pending__{sup_key}"] = prefill
 
-    prompt = st.chat_input("분석할 자연어 요청을 입력하세요 (예: Aurora 락 경합 분석)")
+    prompt = st.chat_input(
+        f"분석 요청 입력 — {s['tab']}",
+        key=f"chat_input__{sup_key}",
+    )
 
-    if prompt:
-        if not runtime_arn:
-            st.warning("AGENTCORE_RUNTIME_ARN 이 비어있어 호출할 수 없습니다.")
-            st.stop()
+    if not prompt:
+        return
 
-        # 추천 prompt 사용 시 lens override (사용자가 직접 바꿨을 수도 있어 저장된 prefill 의 lens 가 우선)
-        active_lens = lens
-        pending = st.session_state.pop("chat_prefill_pending", None)
-        if pending and pending.get("free_text") == prompt and pending.get("lens"):
-            active_lens = pending["lens"]
+    if not runtime_arn:
+        st.warning("AGENTCORE_RUNTIME_ARN 이 비어있어 호출할 수 없습니다.")
+        st.stop()
 
-        base_request: dict = {
-            "mode": mode,
-            "lens": active_lens,
-            "time_range": {"start": start, "end": end},
-            "targets": [t.strip() for t in targets.split(",") if t.strip()],
-            "free_text": prompt,
-            "session_id": st.session_state["session_id"],
-        }
+    st.session_state.pop(f"chat_prefill_pending__{sup_key}", None)
 
-        with st.chat_message("user", avatar="🙋"):
-            st.markdown(prompt)
-            st.caption(
-                f"mode=`{mode}` · lens=`{active_lens}` · "
-                f"window {start[:19]} → {end[:19]} · "
-                f"targets: {', '.join(base_request['targets']) or '—'}"
-            )
+    request_mode = s.get("mode") or "swarm"
+    base_request: dict = {
+        "mode":        request_mode,
+        "time_range":  {"start": start, "end": end},
+        "free_text":   prompt,
+        "session_id":  st.session_state[sid_key],
+    }
+    if request_mode == "swarm":
+        base_request["supervisor"] = sup_key
 
-        turn: dict = {
-            "free_text":   prompt,
-            "mode":        mode,
-            "lens":        active_lens,
-            "start":       start,
-            "end":         end,
-            "targets":     base_request["targets"],
-            "report":      None,
-            "swarm":       None,
-            "elapsed":     None,
-            "fast_context": None,
-        }
+    with st.chat_message("user", avatar="🙋"):
+        st.markdown(prompt)
+        st.caption(
+            f"mode=`{request_mode}` · "
+            + (f"supervisor=`{sup_key}` · " if request_mode == "swarm" else "")
+            + f"window {start[:19]} → {end[:19]}"
+        )
 
-        live = st.container(border=True)
-        with live:
-            st.markdown("**🤖 분석 진행 중…**")
-            t0_total = datetime.now(timezone.utc)
+    turn: dict = {
+        "free_text":   prompt,
+        "supervisor":  sup_key,
+        "start":       start,
+        "end":         end,
+        "swarm":       None,
+        "elapsed":     None,
+    }
 
-            fast_report: dict = {}
-            if mode in ("fast", "hybrid"):
-                st.markdown("**⚡ Fast 분석**")
-                fast_req = {**base_request, "mode": "fast"}
-                fast_report = view_fast_stream.render_stream(agentcore_invoke_stream(fast_req)) or {}
-                turn["report"] = fast_report
+    live = st.container(border=True)
+    with live:
+        st.markdown(f"**🤖 [{s['label']}] 분석 진행 중…**")
+        t0 = datetime.now(timezone.utc)
 
-            if mode in ("swarm", "hybrid"):
-                st.markdown("**🐝 Swarm 분석**")
-                swarm_req = {**base_request, "mode": "swarm"}
+        if use_prev_context:
+            ctx = _build_prev_context(sup_key)
+            if ctx:
+                base_request["fast_context"] = ctx
 
-                ctx: dict = {}
-                if fast_report:
-                    ctx = {
-                        "findings": (fast_report.get("findings") or [])[:30],
-                        "hypotheses": (fast_report.get("hypotheses") or [])[:10],
-                        "next_actions": (fast_report.get("next_actions") or [])[:10],
-                    }
-                if use_prev_context:
-                    prev = _build_fast_context_from_history()
-                    merged_findings = (ctx.get("findings") or []) + [f for f in (prev.get("findings") or []) if f]
-                    merged_hyps = (ctx.get("hypotheses") or []) + [h for h in (prev.get("hypotheses") or []) if h]
-                    merged_actions = (ctx.get("next_actions") or []) + [a for a in (prev.get("next_actions") or []) if a]
-                    ctx = {
-                        "findings":     merged_findings[:30],
-                        "hypotheses":   merged_hyps[:10],
-                        "next_actions": merged_actions[:10],
-                    }
-                if ctx and (ctx.get("findings") or ctx.get("hypotheses")):
-                    swarm_req["fast_context"] = ctx
-                    turn["fast_context"] = ctx
+        sw_final = view_swarm.render_stream(agentcore_invoke_stream(base_request), request=base_request)
+        turn["swarm"] = sw_final
 
-                sw_final = view_swarm.render_stream(agentcore_invoke_stream(swarm_req), request=swarm_req)
-                turn["swarm"] = sw_final
+        elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
+        turn["elapsed"] = elapsed
+        st.caption(f"⏱ 총 {elapsed:.1f}s")
 
-            elapsed = (datetime.now(timezone.utc) - t0_total).total_seconds()
-            turn["elapsed"] = elapsed
-            st.caption(f"⏱ 총 {elapsed:.1f}s")
-
-        st.session_state["history"].append(turn)
-        st.rerun()
+    st.session_state[h_key].append(turn)
+    st.rerun()
 
 
-# ── 시나리오 라이브 모니터 탭 ──
-with tab_gen:
+for tab, s in zip(chat_tabs[:-1], SUPERVISORS):
+    with tab:
+        _render_supervisor_tab(s)
+
+
+with chat_tabs[-1]:
     view_generators.render(autorefresh_sec=int(os.environ.get("GEN_REFRESH_SEC", "5")))

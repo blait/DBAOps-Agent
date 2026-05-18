@@ -69,6 +69,8 @@ variable "duration_sec" {
     slow_query       = 120
     connection_spike = 90
     kafka_isr_shrink = 60
+    cpu_burn         = 180
+    disk_io_burst    = 240
   }
 }
 
@@ -81,5 +83,7 @@ variable "schedules" {
     slow_query       = "rate(20 minutes)"
     connection_spike = "rate(45 minutes)"
     kafka_isr_shrink = "rate(60 minutes)"
+    cpu_burn         = "rate(50 minutes)"
+    disk_io_burst    = "rate(55 minutes)"
   }
 }

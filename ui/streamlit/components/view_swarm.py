@@ -1,10 +1,16 @@
-"""Swarm 모드 뷰 — 카드형 메시지 + tool_call/tool_result 매칭 + streaming 실시간 갱신."""
+"""Swarm 모드 뷰 — 카드형 메시지 + tool_call/tool_result 매칭 + streaming 실시간 갱신.
+
+시계열 도구 결과(`series` / Prometheus `result.values` / awslabs `metricDataResults`) 는
+표뿐 아니라 라인 차트로도 함께 렌더해 시각적 가시성을 확보한다.
+"""
 
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any, Iterator
 
+import pandas as pd
 import streamlit as st
 
 
@@ -15,6 +21,8 @@ _AGENT_AVATAR = {
     "log_specialist":   "📜",
     "query_specialist": "🔎",
     "aws_specialist":   "☁️",
+    "docs_specialist":  "📚",
+    "single_agent":     "🧠",
 }
 
 _ROLE_AVATAR = {
@@ -68,6 +76,173 @@ def _render_kv_table(target, kv: dict[str, Any]) -> None:
     target.dataframe(rows, use_container_width=True, hide_index=True)
 
 
+def _parse_ts(v: Any) -> datetime | None:
+    """ISO8601 / unix epoch / datetime 모두 datetime 으로."""
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v
+    if isinstance(v, (int, float)):
+        # epoch seconds vs millis
+        try:
+            ts = float(v)
+            if ts > 1e12:  # millis
+                ts /= 1000.0
+            return datetime.utcfromtimestamp(ts)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(v, str):
+        s = v.strip().replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(s)
+        except ValueError:
+            try:
+                return datetime.utcfromtimestamp(float(s))
+            except ValueError:
+                return None
+    return None
+
+
+def _to_float(v: Any) -> float | None:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _render_timeseries_chart(target, points: list[tuple[Any, Any]], *,
+                             label: str | None = None,
+                             multi_label: str | None = None) -> bool:
+    """[(ts, value), ...] 리스트를 line chart 로. 표는 별도. value 가 숫자로 cast 가능한 점만."""
+    rows = []
+    for ts, v in points:
+        t = _parse_ts(ts)
+        f = _to_float(v)
+        if t is None or f is None:
+            continue
+        rows.append({"ts": t, "value": f, **({"series": multi_label} if multi_label else {})})
+    if not rows:
+        return False
+    df = pd.DataFrame(rows)
+    if multi_label:
+        # 복수 시리즈 — pivot
+        return False  # multi 는 호출부에서 따로 처리
+    df = df.set_index("ts")
+    if label:
+        df = df.rename(columns={"value": label})
+    target.line_chart(df, height=240)
+    return True
+
+
+def _render_multi_timeseries_chart(target, series_dict: dict[str, list[tuple[Any, Any]]]) -> bool:
+    """{label: [(ts, value), ...]} 를 한 차트에 여러 line 으로."""
+    frames = []
+    for label, pts in series_dict.items():
+        for ts, v in pts:
+            t = _parse_ts(ts)
+            f = _to_float(v)
+            if t is None or f is None:
+                continue
+            frames.append({"ts": t, "label": label, "value": f})
+    if not frames:
+        return False
+    df = pd.DataFrame(frames)
+    pivot = df.pivot_table(index="ts", columns="label", values="value", aggfunc="mean").sort_index()
+    target.line_chart(pivot, height=260)
+    return True
+
+
+def _extract_timeseries_from_obj(obj: Any) -> dict[str, list[tuple[Any, Any]]]:
+    """tool result 한 건에서 시계열 series_dict 추출. 비-시계열은 빈 dict."""
+    if not isinstance(obj, dict):
+        return {}
+    out: dict[str, list[tuple[Any, Any]]] = {}
+
+    # 1) 우리 PoC: {series:[{ts,value}], n_points}
+    series = obj.get("series")
+    if isinstance(series, list) and series and isinstance(series[0], dict) and "ts" in series[0]:
+        label = obj.get("metric_name") or obj.get("label") or "series"
+        out[str(label)] = [(p.get("ts"), p.get("value")) for p in series]
+        return out
+
+    # 2) awslabs cloudwatch get_metric_data
+    mdr = obj.get("metricDataResults") or obj.get("metric_data_results")
+    if isinstance(mdr, list) and mdr and isinstance(mdr[0], dict):
+        for m in mdr:
+            ts_list = m.get("timestamps") or m.get("Timestamps") or []
+            val_list = m.get("values") or m.get("Values") or []
+            if not ts_list:
+                continue
+            label = m.get("label") or m.get("Label") or m.get("id") or m.get("Id") or "metric"
+            out[str(label)] = list(zip(ts_list, val_list))
+        if out:
+            return out
+
+    # 3) Prometheus range_query
+    promql_result = None
+    if isinstance(obj.get("data"), dict):
+        promql_result = obj["data"].get("result")
+    elif isinstance(obj.get("result"), list):
+        promql_result = obj["result"]
+    if isinstance(promql_result, list):
+        for item in promql_result:
+            if not isinstance(item, dict):
+                continue
+            metric = item.get("metric") or {}
+            base = metric.get("__name__") or ""
+            extras = ",".join(f"{k}={v}" for k, v in metric.items() if k != "__name__")
+            label = f"{base}{{{extras}}}" if extras else (base or "value")
+            vals = item.get("values")
+            if isinstance(vals, list):
+                out[label] = [(p[0], p[1]) for p in vals if isinstance(p, (list, tuple)) and len(p) >= 2]
+        if out:
+            return out
+
+    return out
+
+
+def _gather_timeseries(messages: list[dict]) -> list[dict]:
+    """tool result 메시지들을 훑어 시계열 묶음 list 반환.
+    각 묶음 = {tool_name, series_dict, tool_call_id}.
+    """
+    out: list[dict] = []
+    for m in messages:
+        if m.get("role") != "tool":
+            continue
+        text = m.get("text") or ""
+        if not text:
+            continue
+        try:
+            obj = json.loads(text)
+        except Exception:  # noqa: BLE001
+            continue
+        sd = _extract_timeseries_from_obj(obj)
+        if not sd:
+            continue
+        out.append({
+            "tool_name":    m.get("name") or "?",
+            "tool_call_id": m.get("tool_call_id") or "",
+            "series":       sd,
+        })
+    return out
+
+
+def _render_supervisor_charts(target, messages: list[dict]) -> None:
+    """최종 보고 카드에 시계열 차트 섹션 — message history 에서 추출."""
+    bundles = _gather_timeseries(messages)
+    if not bundles:
+        return
+    target.markdown("#### 📈 분석에 사용된 시계열")
+    for i, b in enumerate(bundles, start=1):
+        with target.container(border=True):
+            target.caption(f"[{i}] tool=`{b['tool_name']}` · series={len(b['series'])}")
+            ok = _render_multi_timeseries_chart(target, b["series"])
+            if not ok:
+                target.caption("(차트로 그릴 수치가 없음)")
+
+
 def _flatten_for_table(items: list[Any]) -> list[dict] | None:
     """list 안의 원소들을 보고 dict 리스트로 변환 (가능하면)."""
     if not items:
@@ -111,16 +286,66 @@ def _render_result_payload(target, obj: Any) -> bool:
             target.caption(f"row_count={obj['row_count']}")
         return True
 
-    # 3) timeseries: {n_points, series: [{ts, value}, ...]}
+    # 3) timeseries: {n_points, series: [{ts, value}, ...]}  ← 우리 PoC cloudwatch_metric / msk_metric / rds_pi
     series = obj.get("series")
     if isinstance(series, list) and series and isinstance(series[0], dict) and "ts" in series[0]:
         data = [
             {"ts": _scalar(p.get("ts"), 30), "value": _scalar(p.get("value"))}
             for p in series[:300]
         ]
+        meta = []
         if obj.get("n_points") is not None:
-            target.caption(f"n_points={obj['n_points']}" + (f" · 표시 {len(data)}" if len(series) > 300 else ""))
+            meta.append(f"n_points={obj['n_points']}")
+        if len(series) > 300:
+            meta.append(f"표시 {len(data)} / {len(series)}점")
+        if meta:
+            target.caption(" · ".join(meta))
         target.dataframe(data, use_container_width=True, hide_index=True)
+        return True
+
+    # 3-a) awslabs cloudwatch get_metric_data — {metricDataResults: [{id, label, timestamps, values}]}
+    mdr = obj.get("metricDataResults") or obj.get("metric_data_results")
+    if isinstance(mdr, list) and mdr and isinstance(mdr[0], dict) and \
+       ("timestamps" in mdr[0] or "Timestamps" in mdr[0]):
+        for m in mdr:
+            label = m.get("label") or m.get("Label") or m.get("id") or m.get("Id") or "metric"
+            ts_list = m.get("timestamps") or m.get("Timestamps") or []
+            val_list = m.get("values") or m.get("Values") or []
+            target.markdown(f"**{label}** · {len(ts_list)} pts")
+            target.dataframe(
+                [{"ts": _scalar(t, 30), "value": _scalar(v)} for t, v in zip(ts_list, val_list)][:300],
+                use_container_width=True,
+                hide_index=True,
+            )
+        return True
+
+    # 3-b) Prometheus range_query — {result: [{metric: {...}, values: [[ts, "v"], ...]}]}
+    promql_result = None
+    if isinstance(obj.get("data"), dict):
+        promql_result = obj["data"].get("result")
+    elif isinstance(obj.get("result"), list):
+        promql_result = obj["result"]
+    if isinstance(promql_result, list) and promql_result and isinstance(promql_result[0], dict) and \
+       (isinstance(promql_result[0].get("values"), list) or isinstance(promql_result[0].get("value"), list)):
+        for item in promql_result:
+            metric = item.get("metric") or {}
+            label = metric.get("__name__") or ""
+            extras = ",".join(f"{k}={v}" for k, v in metric.items() if k != "__name__")
+            full_label = f"{label}{{{extras}}}" if extras else (label or "value")
+            vals = item.get("values")
+            if isinstance(vals, list):
+                pts = [(p[0], p[1]) for p in vals if isinstance(p, (list, tuple)) and len(p) >= 2]
+            elif isinstance(item.get("value"), (list, tuple)) and len(item["value"]) >= 2:
+                pts = [(item["value"][0], item["value"][1])]
+            else:
+                pts = []
+            target.markdown(f"**{full_label}** · {len(pts)} pts")
+            if pts:
+                target.dataframe(
+                    [{"ts": _scalar(t, 30), "value": _scalar(v)} for t, v in pts[:300]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
         return True
 
     # 4) S3 log fetch: {line_count, lines: [...]}
@@ -282,6 +507,19 @@ def render(result: dict, request: dict | None = None) -> None:
     for m in msgs:
         _render_message(m)
 
+    # 최종 정리 카드 — 마지막 ai 메시지(tool_calls 없는) + 시계열 차트
+    last_ai = next(
+        (m for m in reversed(msgs)
+         if m.get("role") == "ai" and not m.get("tool_calls") and (m.get("text") or "").strip()),
+        None,
+    )
+    if last_ai:
+        with st.container(border=True):
+            st.markdown("### 📤 최종 정리")
+            st.caption(f"by {_agent_chip(last_ai.get('name'))}")
+            st.markdown(last_ai.get("text") or "")
+            _render_supervisor_charts(st, msgs)
+
 
 # ───────────────────────── Streaming ─────────────────────────
 
@@ -390,6 +628,7 @@ def render_stream(events: Iterator[dict], request: dict | None = None) -> dict:
                         st.markdown("### 📤 최종 정리")
                         st.caption(f"by {_agent_chip(last_ai.get('name'))}")
                         st.markdown(last_ai["text"])
+                        _render_supervisor_charts(st, messages)
 
     return {
         "messages": messages,

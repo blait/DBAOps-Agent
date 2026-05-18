@@ -7,12 +7,17 @@ PI 의 GroupBy.Group 은 dimension 의 prefix 임 (예: "db.sql_tokenized" group
 db.sql_tokenized.statement / db.sql_tokenized.id / db.sql_tokenized.db_id 등). 그래서
 사용자가 흔히 적는 ".statement" 같은 dimension name 을 group 으로 보내면 InvalidArgument.
 이 핸들러는 자동으로 group prefix 만 잘라 보낸다.
+
+또한 PI 의 Identifier 는 **DbiResourceId (db-XXXX)** 만 받음. agent 가 흔히 보내는
+DBInstanceIdentifier (예: 'dbaops-poc-aurora-pg-writer') 는 NotAuthorized 떨어짐.
+'db-' prefix 가 없으면 RDS describe 로 자동 변환한다.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from functools import lru_cache
 
 import boto3
 
@@ -20,6 +25,27 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 pi = boto3.client("pi")
+rds = boto3.client("rds")
+
+
+@lru_cache(maxsize=64)
+def _resolve_dbi_resource_id(identifier: str) -> str:
+    """DBInstanceIdentifier → DbiResourceId. 이미 db- prefix 면 그대로."""
+    if not identifier:
+        return identifier
+    if identifier.startswith("db-"):
+        return identifier
+    try:
+        resp = rds.describe_db_instances(DBInstanceIdentifier=identifier)
+        instances = resp.get("DBInstances") or []
+        if instances:
+            rid = instances[0].get("DbiResourceId")
+            if rid:
+                logger.info("resolved %s → %s", identifier, rid)
+                return rid
+    except Exception as e:  # noqa: BLE001
+        logger.warning("describe_db_instances(%s) failed: %s", identifier, e)
+    return identifier
 
 _VALID_GROUPS = {
     "db.sql_tokenized": "db.sql_tokenized.statement",
@@ -57,10 +83,11 @@ def handler(event: dict, _ctx) -> dict:
         body = json.loads(body)
 
     group, label_dim = _normalize_group(body.get("group_by") or "db.sql_tokenized")
+    db_id = _resolve_dbi_resource_id(body["db_id"])
 
     resp = pi.get_resource_metrics(
         ServiceType="RDS",
-        Identifier=body["db_id"],
+        Identifier=db_id,
         MetricQueries=[
             {
                 "Metric": "db.load.avg",

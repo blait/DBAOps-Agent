@@ -5,7 +5,7 @@
 # data_generator + log_generator task definition 을 한 모듈에서 관리.
 
 locals {
-  data_workloads = ["baseline", "lock_contention", "slow_query", "connection_spike", "kafka_isr_shrink"]
+  data_workloads = ["baseline", "lock_contention", "slow_query", "connection_spike", "kafka_isr_shrink", "cpu_burn", "disk_io_burst"]
   log_sources    = ["postgres", "mysql", "kafka"]
 }
 
