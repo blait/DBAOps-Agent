@@ -1,9 +1,14 @@
-"""AgentCore Runtime entrypoint — supervisor 그래프 only.
+"""AgentCore Runtime entrypoint — pipeline / single mode.
 
 AgentCore Runtime 은 컨테이너 내부에서 :8080/invocations 로 들어오는 POST 를 처리.
 응답 형태:
 - 기본: 동기 호출, JSON 한 객체 반환
 - (Accept: application/x-ndjson 또는 request.stream=true) → NDJSON streaming
+
+Modes:
+- pipeline (default) : 3 도메인 단일 에이전트 + validation + report. request.domain 필요.
+- single             : 모든 도구 풀 평탄화한 1 명 에이전트 (비교용).
+- swarm              : 폐기됨 — 명시적 에러.
 """
 
 from __future__ import annotations
@@ -22,7 +27,13 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 def handler(event: dict, context: Any | None = None) -> dict:
     logger.info("invoke: %s", json.dumps(event)[:500])
     request = event.get("request") or {}
-    mode = (request.get("mode") or "swarm").lower()
+    mode = (request.get("mode") or "pipeline").lower()
+
+    if mode == "swarm":
+        return {
+            "error":   "mode=swarm has been removed in the pipeline migration. Use mode=pipeline with a domain field.",
+            "request": request,
+        }
 
     if mode == "single":
         from .single_graph import invoke_single
@@ -31,24 +42,24 @@ def handler(event: dict, context: Any | None = None) -> dict:
                 request,
                 recursion_limit=int(os.environ.get("SINGLE_RECURSION_LIMIT", "80")),
             )
-            return {"swarm": result, "request": request}  # UI 호환 — 응답 포맷 같음
+            return {"swarm": result, "request": request}
         except Exception as e:  # noqa: BLE001
             logger.exception("single invoke failed")
             return {"error": str(e), "request": request}
 
-    # default: swarm (3 supervisor)
-    from .swarm_graph import invoke_swarm, supervisor_keys
-    sup = request.get("supervisor")
-    if sup and sup not in supervisor_keys():
-        return {"error": f"unknown supervisor: {sup}. valid={supervisor_keys()}", "request": request}
+    # default: pipeline
+    from .pipeline_graph import invoke_pipeline, domain_keys
+    domain = request.get("domain")
+    if domain not in domain_keys():
+        return {
+            "error":   f"mode=pipeline requires request.domain in {domain_keys()}, got {domain!r}",
+            "request": request,
+        }
     try:
-        result = invoke_swarm(
-            request,
-            recursion_limit=int(os.environ.get("SWARM_RECURSION_LIMIT", "30")),
-        )
-        return {"swarm": result, "request": request}
+        result = invoke_pipeline(request)
+        return {"swarm": result, "request": request}  # UI 호환 — 응답 키 이름은 'swarm' 유지
     except Exception as e:  # noqa: BLE001
-        logger.exception("swarm invoke failed")
+        logger.exception("pipeline invoke failed")
         return {"error": str(e), "request": request}
 
 
@@ -133,7 +144,13 @@ class _Handler(BaseHTTPRequestHandler):
             )
 
             if stream_requested:
-                mode = (request.get("mode") or "swarm").lower()
+                mode = (request.get("mode") or "pipeline").lower()
+                if mode == "swarm":
+                    err = {"type": "error", "error": "mode=swarm has been removed; use mode=pipeline."}
+                    self._start_ndjson()
+                    self._write_chunk((json.dumps(err) + "\n").encode())
+                    self._end_chunked()
+                    return
                 if mode == "single":
                     from .single_graph import iter_single
                     self._stream_iterator(iter_single(
@@ -141,11 +158,8 @@ class _Handler(BaseHTTPRequestHandler):
                         recursion_limit=int(os.environ.get("SINGLE_RECURSION_LIMIT", "80")),
                     ))
                 else:
-                    from .swarm_graph import iter_swarm
-                    self._stream_iterator(iter_swarm(
-                        request,
-                        recursion_limit=int(os.environ.get("SWARM_RECURSION_LIMIT", "30")),
-                    ))
+                    from .pipeline_graph import iter_pipeline
+                    self._stream_iterator(iter_pipeline(request))
                 return
 
             result = handler(event)
@@ -166,7 +180,7 @@ def serve(host: str = "0.0.0.0", port: int = 8080) -> None:
 
 def main(argv: list[str]) -> int:
     if "--once" in argv:
-        out = handler({"request": {"free_text": "smoke", "supervisor": "os_metric"}})
+        out = handler({"request": {"mode": "pipeline", "domain": "os_metric", "free_text": "smoke"}})
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return 0
     serve(port=int(os.environ.get("PORT", "8080")))

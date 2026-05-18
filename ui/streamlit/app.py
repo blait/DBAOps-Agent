@@ -23,9 +23,10 @@ SUPERVISORS: list[dict] = [
         "tab":   "🖥️ OS·인프라 메트릭",
         "responsibility": "OS·호스트 레이어 메트릭(CPU/메모리/디스크/네트워크) 추세·이상 탐지·임계치 도달 시점 분석",
         "input_hint":     "주요 입력: 시간 범위",
-        "deliverable":    "산출물: 메트릭 추세 + 이상 지점 + 가설",
+        "deliverable":    "분석 → 검증 → 리포트 (markdown + 자동 차트)",
         "example":        "예: 'EC2 prometheus 의 최근 1시간 CPU peak 시점과 baseline 대비 격차 분석'",
-        "mode":           "swarm",
+        "mode":           "pipeline",
+        "domain":         "os_metric",
     },
     {
         "key":   "db_metric",
@@ -33,9 +34,10 @@ SUPERVISORS: list[dict] = [
         "tab":   "🗄️ DB 성능 메트릭",
         "responsibility": "DBMS·Kafka 클러스터 내부 성능 메트릭 정량 분석 (TPS/QPS/Lock/Cache hit/Lag/ISR)",
         "input_hint":     "주요 입력: 시간 범위",
-        "deliverable":    "산출물: TPS·QPS·Lock·Cache hit·Lag·ISR 추세 + 비정상 패턴 + 가설",
+        "deliverable":    "분석 → 검증 → 리포트 (markdown + 자동 차트)",
         "example":        "예: 'MySQL slow_log 최근 30분 TOP 5 / Kafka dbaops.orders consumer lag 추세'",
-        "mode":           "swarm",
+        "mode":           "pipeline",
+        "domain":         "db_metric",
     },
     {
         "key":   "log",
@@ -43,19 +45,21 @@ SUPERVISORS: list[dict] = [
         "tab":   "📜 로그 분석",
         "responsibility": "Error/Slow/Audit/시스템 로그 패턴 분류, 빈발 에러 탐지, RCA 후보 도출",
         "input_hint":     "주요 입력: 시간 범위 / 키워드",
-        "deliverable":    "산출물: 에러 분류 + 빈발 패턴 + RCA 후보 + 추가 확인 필요 항목",
+        "deliverable":    "분석 → 검증 → 리포트 (markdown + 자동 차트)",
         "example":        "예: 'Aurora PG 최근 1시간 deadlock / FATAL 빈도와 시간 분포'",
-        "mode":           "swarm",
+        "mode":           "pipeline",
+        "domain":         "log",
     },
     {
         "key":   "single",
         "label": "🧠 단일 에이전트 (RCA)",
         "tab":   "🧠 단일 에이전트",
-        "responsibility": "한 명의 RCA 분석가가 모든 도구 (OS/DB/로그/EXPLAIN/AWS/Docs) 를 직접 사용. handoff 없음, 카테고리 경계 없음.",
-        "input_hint":     "주요 입력: 시간 범위 + 자연어 질문 (단순 조회부터 cross-domain RCA 까지)",
-        "deliverable":    "산출물: 분류 + 발견 사실(인용 포함) + 가설(hedging) + 권고",
+        "responsibility": "한 명의 RCA 분석가가 모든 도구를 직접 사용. handoff 없음, 카테고리 경계 없음. 비교용.",
+        "input_hint":     "주요 입력: 시간 범위 + 자연어 질문",
+        "deliverable":    "분류 + 발견 사실(인용 포함) + 가설(hedging) + 권고",
         "example":        "예: 'Aurora 최근 1시간 어디서 병목이 났는지 메트릭/로그/PI 종합해서 분석'",
         "mode":           "single",
+        "domain":         None,
     },
 ]
 
@@ -200,21 +204,21 @@ def _render_supervisor_tab(s: dict) -> None:
 
     st.session_state.pop(f"chat_prefill_pending__{sup_key}", None)
 
-    request_mode = s.get("mode") or "swarm"
+    request_mode = s.get("mode") or "pipeline"
     base_request: dict = {
         "mode":        request_mode,
         "time_range":  {"start": start, "end": end},
         "free_text":   prompt,
         "session_id":  st.session_state[sid_key],
     }
-    if request_mode == "swarm":
-        base_request["supervisor"] = sup_key
+    if request_mode == "pipeline":
+        base_request["domain"] = s.get("domain") or sup_key
 
     with st.chat_message("user", avatar="🙋"):
         st.markdown(prompt)
         st.caption(
             f"mode=`{request_mode}` · "
-            + (f"supervisor=`{sup_key}` · " if request_mode == "swarm" else "")
+            + (f"domain=`{base_request.get('domain','?')}` · " if request_mode == "pipeline" else "")
             + f"window {start[:19]} → {end[:19]}"
         )
 

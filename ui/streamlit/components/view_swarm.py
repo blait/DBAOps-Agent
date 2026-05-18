@@ -23,6 +23,11 @@ _AGENT_AVATAR = {
     "aws_specialist":   "☁️",
     "docs_specialist":  "📚",
     "single_agent":     "🧠",
+    "os_metric_agent":  "🖥️",
+    "db_metric_agent":  "🗄️",
+    "log_agent":        "📜",
+    "validation_agent": "🧐",
+    "report_agent":     "📝",
 }
 
 _ROLE_AVATAR = {
@@ -399,6 +404,90 @@ def _render_result_payload(target, obj: Any) -> bool:
     return False
 
 
+_CHART_FENCE_RE = __import__("re").compile(r"```json-chart\s*\n([\s\S]*?)\n```", __import__("re").MULTILINE)
+
+
+def _render_report(markdown: str, charts: list[dict], messages: list[dict]) -> None:
+    """report 에이전트 markdown 을 렌더 — fenced ```json-chart 블록은 차트로 치환.
+
+    chart spec: {"title": str, "source_tool_call_id": str, "metric_filter": [str, ...]?}
+    매칭은 source_tool_call_id 우선. 못 찾으면 metric_filter 로 label substring fallback.
+    """
+    if not markdown:
+        return
+
+    # markdown 을 차트 fence 단위로 split — 각 fence 의 블록을 차트로 대체
+    rendered_any_chart = False
+    pos = 0
+    for m in _CHART_FENCE_RE.finditer(markdown):
+        # fence 앞부분 markdown
+        before = markdown[pos:m.start()].rstrip()
+        if before:
+            st.markdown(before)
+        # fence body parse
+        try:
+            spec = json.loads(m.group(1).strip())
+        except json.JSONDecodeError:
+            st.warning(f"차트 spec parse 실패: {m.group(1).strip()[:120]}")
+            pos = m.end()
+            continue
+        _render_one_chart(spec, messages)
+        rendered_any_chart = True
+        pos = m.end()
+    # 마지막 fence 뒤 잔여 markdown
+    rest = markdown[pos:].strip()
+    if rest:
+        st.markdown(rest)
+
+    # 차트가 spec 으로 1개도 안 그려졌고 시계열 tool result 가 history 에 있으면 fallback 차트
+    if not rendered_any_chart and not charts:
+        bundles = _gather_timeseries(messages)
+        if bundles:
+            st.caption("ℹ️ 리포트에 명시된 차트가 없어 message history 의 시계열을 자동 표시합니다.")
+            _render_supervisor_charts(st, messages)
+
+
+def _render_one_chart(spec: dict, messages: list[dict]) -> None:
+    """chart spec 한 건 → message history 에서 매칭되는 시계열 찾아 line chart."""
+    title = spec.get("title") or "차트"
+    target_id = spec.get("source_tool_call_id")
+    metric_filter = spec.get("metric_filter") or []
+
+    series_dict: dict[str, list[tuple[Any, Any]]] = {}
+    matched_msg = None
+    if target_id:
+        for m in messages:
+            if m.get("role") == "tool" and m.get("tool_call_id") == target_id:
+                matched_msg = m
+                break
+
+    if matched_msg:
+        try:
+            obj = json.loads(matched_msg.get("text") or "{}")
+        except Exception:  # noqa: BLE001
+            obj = None
+        if obj is not None:
+            series_dict = _extract_timeseries_from_obj(obj)
+
+    if metric_filter and series_dict:
+        # label substring 으로 필터
+        filtered = {}
+        for label, pts in series_dict.items():
+            if any(f.lower() in label.lower() for f in metric_filter):
+                filtered[label] = pts
+        if filtered:
+            series_dict = filtered
+
+    with st.container(border=True):
+        st.markdown(f"**📈 {title}**")
+        if not series_dict:
+            st.caption(f"(매칭되는 시계열 없음 — source_tool_call_id={target_id or '없음'})")
+            return
+        ok = _render_multi_timeseries_chart(st, series_dict)
+        if not ok:
+            st.caption("(시계열 값이 비어있거나 숫자로 변환 불가)")
+
+
 def _render_message(m: dict, *, container=None) -> None:
     """한 메시지 카드 렌더. container 가 주어지면 그 안에 (placeholder.container() 등)."""
     target = container if container is not None else st
@@ -504,21 +593,41 @@ def render(result: dict, request: dict | None = None) -> None:
     if not msgs:
         st.info("메시지 없음.")
         return
+
+    # validation / report 메타가 박힌 메시지는 별도 카드로, 나머지는 일반 렌더
     for m in msgs:
+        if m.get("name") == "validation_agent" and m.get("_validation"):
+            v = m["_validation"]
+            with st.container(border=True):
+                if v.get("passed"):
+                    st.success("🧐 검증 통과 — 이슈 0건")
+                else:
+                    issues = v.get("issues") or []
+                    st.warning(f"🧐 검증 실패 — 이슈 {len(issues)}건")
+                    for it in issues:
+                        st.caption(f"- `{it.get('kind','?')}` · {(it.get('detail') or '')[:300]}")
+            continue
+        if m.get("name") == "report_agent" and (m.get("text") or m.get("_charts")):
+            with st.container(border=True):
+                st.markdown("### 📝 리포트")
+                _render_report(m.get("text") or "", m.get("_charts") or [], msgs)
+            continue
         _render_message(m)
 
-    # 최종 정리 카드 — 마지막 ai 메시지(tool_calls 없는) + 시계열 차트
-    last_ai = next(
-        (m for m in reversed(msgs)
-         if m.get("role") == "ai" and not m.get("tool_calls") and (m.get("text") or "").strip()),
-        None,
-    )
-    if last_ai:
-        with st.container(border=True):
-            st.markdown("### 📤 최종 정리")
-            st.caption(f"by {_agent_chip(last_ai.get('name'))}")
-            st.markdown(last_ai.get("text") or "")
-            _render_supervisor_charts(st, msgs)
+    # report 메시지가 없을 때 fallback (구 형식 호환)
+    has_report = any(m.get("name") == "report_agent" for m in msgs)
+    if not has_report:
+        last_ai = next(
+            (m for m in reversed(msgs)
+             if m.get("role") == "ai" and not m.get("tool_calls") and (m.get("text") or "").strip()),
+            None,
+        )
+        if last_ai:
+            with st.container(border=True):
+                st.markdown("### 📤 최종 정리")
+                st.caption(f"by {_agent_chip(last_ai.get('name'))}")
+                st.markdown(last_ai.get("text") or "")
+                _render_supervisor_charts(st, msgs)
 
 
 # ───────────────────────── Streaming ─────────────────────────
@@ -603,6 +712,35 @@ def render_stream(events: Iterator[dict], request: dict | None = None) -> dict:
             aborted = ev.get("reason")
             abort_metric.metric("⚠️ 중단", aborted or "abort")
             status_box.warning(f"⚠️ 중단: {aborted}")
+        elif t == "stage":
+            stage = ev.get("stage", "?")
+            stage_label = {"domain": "분석", "validation": "검증", "revise": "재분석", "report": "리포트"}.get(stage, stage)
+            status_box.caption(f"🔄 stage `{stage_label}` 완료")
+        elif t == "validation":
+            passed = ev.get("passed", True)
+            issues = ev.get("issues") or []
+            with log_box:
+                with st.container(border=True):
+                    if passed:
+                        st.success(f"🧐 검증 통과 — 이슈 0건")
+                    else:
+                        st.warning(f"🧐 검증 실패 — 이슈 {len(issues)}건 (재분석 진행)")
+                        for it in issues:
+                            kind = it.get("kind", "?")
+                            detail = (it.get("detail") or "")[:300]
+                            st.caption(f"- `{kind}` · {detail}")
+            validation_result = {"passed": passed, "issues": issues}
+            messages.append({"role": "ai", "name": "validation_agent", "text": "", "tool_calls": [],
+                             "_validation": validation_result})
+        elif t == "report":
+            md = ev.get("markdown") or ""
+            charts = ev.get("charts") or []
+            with log_box:
+                with st.container(border=True):
+                    st.markdown("### 📝 리포트")
+                    _render_report(md, charts, messages)
+            messages.append({"role": "ai", "name": "report_agent", "text": md, "tool_calls": [],
+                             "_charts": charts})
         elif t == "error":
             err = ev.get("error")
             status_box.error(f"❌ {err}")
@@ -616,19 +754,21 @@ def render_stream(events: Iterator[dict], request: dict | None = None) -> dict:
                 )
             status_box.success(f"✅ 완료 · 메시지 {n_messages}건 · 핸드오프 {max(0, len(handoffs) - 1)}회")
 
-            # 최종 정리 카드 — 마지막 ai 메시지가 길고 도구 호출이 없으면 그게 정리
-            last_ai = next(
-                (m for m in reversed(messages)
-                 if m.get("role") == "ai" and not m.get("tool_calls") and (m.get("text") or "").strip()),
-                None,
-            )
-            if last_ai and last_ai.get("text"):
-                with log_box:
-                    with st.container(border=True):
-                        st.markdown("### 📤 최종 정리")
-                        st.caption(f"by {_agent_chip(last_ai.get('name'))}")
-                        st.markdown(last_ai["text"])
-                        _render_supervisor_charts(st, messages)
+            # report 이벤트가 안 왔을 때만 fallback 으로 최종 정리 카드
+            already_reported = any(m.get("name") == "report_agent" for m in messages)
+            if not already_reported:
+                last_ai = next(
+                    (m for m in reversed(messages)
+                     if m.get("role") == "ai" and not m.get("tool_calls") and (m.get("text") or "").strip()),
+                    None,
+                )
+                if last_ai and last_ai.get("text"):
+                    with log_box:
+                        with st.container(border=True):
+                            st.markdown("### 📤 최종 정리")
+                            st.caption(f"by {_agent_chip(last_ai.get('name'))}")
+                            st.markdown(last_ai["text"])
+                            _render_supervisor_charts(st, messages)
 
     return {
         "messages": messages,

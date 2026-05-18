@@ -35,7 +35,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.prebuilt import create_react_agent
 
 from .llm import get_llm
-from .swarm_graph import normalize_message, _format_fast_context  # 재사용
+from .pipeline_graph import normalize_message, _format_fast_context  # 재사용
 from .tools.mcp_auto import build_mcp_tools
 from .tools.mcp_tools import infra_context
 
