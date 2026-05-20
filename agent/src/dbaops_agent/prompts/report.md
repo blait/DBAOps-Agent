@@ -14,8 +14,8 @@ The markdown must follow this section order:
 ## 핵심 발견
 - Bullet list, 3–6 items max. Each bullet must be a concrete finding with a tool citation in parentheses.
 
-## 시계열
-- Insert one or more chart blocks (see chart_spec). Pick AT MOST 3 charts that best illustrate the findings. Skip this section if no timeseries data is relevant.
+## 시각화
+- Insert one or more chart blocks (see chart_spec). Pick AT MOST 3 charts that best illustrate the findings. Skip this section if no chart is helpful.
 
 ## 가설과 검증 방법
 - Each item: hypothesis + confidence + how to verify.
@@ -25,21 +25,57 @@ The markdown must follow this section order:
 </report_structure>
 
 <chart_spec>
-Insert charts as fenced code blocks with the language tag `json-chart`. Each block is one chart. Schema:
+Insert charts as fenced code blocks with the language tag `json-chart`. Each block is one chart. The schema depends on `chart_type`.
 
+Available chart types:
+- `line`      : timeseries trend (default for cloudwatch_metric / prometheus_range_query / msk_metrics).
+- `bar`       : categorical comparison (e.g., top SQL by AAS, error count per kind, slow query count per digest).
+- `scatter`   : two-numeric correlation (e.g., query_time vs rows_examined).
+- `histogram` : distribution of a single numeric column.
+- `area`      : cumulative timeseries (uses the same series shape as line).
+- `table`     : simple tabular display when no chart fits but a structured list is worth showing.
+
+Common fields (every chart):
 ```json-chart
 {
-  "title": "<short title in Korean>",
-  "source_tool_call_id": "<tool_call_id from the tool history>",
-  "metric_filter": ["<optional: substring of metric label to filter>", ...]
+  "chart_type":          "line | bar | scatter | histogram | area | table",
+  "title":               "<short title in Korean>",
+  "source_tool_call_id": "<tool_call_id from the tool history>"
 }
 ```
 
+Per-type extra fields:
+
+- line / area:
+  - `metric_filter`: ["substring", ...]   — optional filter on series labels.
+
+- bar:
+  - `x_field`:  "<dotted path or array index pointing to category labels>"
+  - `y_field`:  "<dotted path or array index pointing to numeric values>"
+  - `top_n`:    int (optional, keep top N by y_field).
+  Example y_field for rds_performance_insights result: "top_sql[*].label"   x_field: same array, `aas` for y.
+
+- scatter:
+  - `x_field`, `y_field`: dotted paths to numeric columns.
+  - `label_field`: optional path for point label.
+
+- histogram:
+  - `field`: dotted path to a list of numbers OR a list of dicts with one numeric field.
+  - `bins`:  optional int (default 20).
+
+- table:
+  - `columns`: ["col1", "col2", ...] (optional — defaults to first row keys).
+  - `rows_field`: dotted path to a list-of-dicts in the tool result.
+
+Field path syntax (dotted + [*]):
+- `top_sql[*].aas`              → for each item in top_sql list, take its `aas` field.
+- `series[*].value`             → list of numeric values from a timeseries.
+- `metricDataResults[0].values` → first metric's values array.
+
 Rules:
-- `source_tool_call_id` is REQUIRED. Pick a tool call whose result contains timeseries data (cloudwatch_metric, prometheus_range_query, msk_metrics, rds_pi etc.).
-- `metric_filter` is OPTIONAL. If a tool call returned multiple series and you want only some of them in this chart, list label substrings.
-- Do NOT invent tool_call_ids. If you cannot find a relevant tool call, OMIT the chart instead of fabricating one.
-- Pick charts that the user actually needs to SEE — do not chart everything. Prefer charts that show the anomaly window.
+- `source_tool_call_id` is REQUIRED for every chart. Do NOT invent tool_call_ids — pick from the provided tool_history. If nothing fits, OMIT the chart.
+- Match the chart_type to the data shape. Do not request `line` on rds_performance_insights (it returns a list of SQL with AAS — use `bar`).
+- Pick charts the user actually needs to SEE. Prefer charts that highlight the anomaly. Maximum 3 charts.
 </chart_spec>
 
 <style_rules>

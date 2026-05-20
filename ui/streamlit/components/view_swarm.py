@@ -447,45 +447,254 @@ def _render_report(markdown: str, charts: list[dict], messages: list[dict]) -> N
             _render_supervisor_charts(st, messages)
 
 
+def _resolve_path(obj: Any, path: str) -> Any:
+    """Dotted-path resolver — 'top_sql[*].aas' / 'metricDataResults[0].values' / 'series'.
+
+    [*] = 리스트의 모든 요소에 대해 같은 path 적용 (returns list).
+    [N] = N 번째 요소.
+    """
+    if not path or obj is None:
+        return obj
+    cur: Any = obj
+    # tokenize: split on . and [...]
+    tokens = []
+    buf = ""
+    i = 0
+    while i < len(path):
+        c = path[i]
+        if c == ".":
+            if buf:
+                tokens.append(("key", buf)); buf = ""
+            i += 1
+        elif c == "[":
+            if buf:
+                tokens.append(("key", buf)); buf = ""
+            j = path.find("]", i)
+            if j < 0:
+                return None
+            inside = path[i+1:j]
+            tokens.append(("idx", inside))
+            i = j + 1
+        else:
+            buf += c
+            i += 1
+    if buf:
+        tokens.append(("key", buf))
+
+    for kind, val in tokens:
+        if cur is None:
+            return None
+        if kind == "key":
+            if isinstance(cur, dict):
+                cur = cur.get(val)
+            else:
+                return None
+        elif kind == "idx":
+            if val == "*":
+                if not isinstance(cur, list):
+                    return None
+                # 남은 토큰을 각 요소에 재귀 적용
+                rest_idx = tokens.index((kind, val)) + 1
+                rest_tokens = tokens[rest_idx:]
+                rest_path = _tokens_to_path(rest_tokens)
+                return [_resolve_path(item, rest_path) for item in cur]
+            else:
+                try:
+                    n = int(val)
+                except ValueError:
+                    return None
+                if not isinstance(cur, list) or n >= len(cur) or n < -len(cur):
+                    return None
+                cur = cur[n]
+    return cur
+
+
+def _tokens_to_path(tokens: list) -> str:
+    out = ""
+    for kind, val in tokens:
+        if kind == "key":
+            if out:
+                out += "."
+            out += val
+        elif kind == "idx":
+            out += f"[{val}]"
+    return out
+
+
+def _find_tool_result(messages: list[dict], tool_call_id: str | None) -> dict | None:
+    if not tool_call_id:
+        return None
+    for m in messages:
+        if m.get("role") == "tool" and m.get("tool_call_id") == tool_call_id:
+            try:
+                return json.loads(m.get("text") or "{}")
+            except Exception:  # noqa: BLE001
+                return None
+    return None
+
+
 def _render_one_chart(spec: dict, messages: list[dict]) -> None:
-    """chart spec 한 건 → message history 에서 매칭되는 시계열 찾아 line chart."""
+    """chart spec 한 건을 chart_type 에 맞춰 렌더."""
+    chart_type = (spec.get("chart_type") or "line").lower()
     title = spec.get("title") or "차트"
     target_id = spec.get("source_tool_call_id")
-    metric_filter = spec.get("metric_filter") or []
-
-    series_dict: dict[str, list[tuple[Any, Any]]] = {}
-    matched_msg = None
-    if target_id:
-        for m in messages:
-            if m.get("role") == "tool" and m.get("tool_call_id") == target_id:
-                matched_msg = m
-                break
-
-    if matched_msg:
-        try:
-            obj = json.loads(matched_msg.get("text") or "{}")
-        except Exception:  # noqa: BLE001
-            obj = None
-        if obj is not None:
-            series_dict = _extract_timeseries_from_obj(obj)
-
-    if metric_filter and series_dict:
-        # label substring 으로 필터
-        filtered = {}
-        for label, pts in series_dict.items():
-            if any(f.lower() in label.lower() for f in metric_filter):
-                filtered[label] = pts
-        if filtered:
-            series_dict = filtered
+    obj = _find_tool_result(messages, target_id)
 
     with st.container(border=True):
-        st.markdown(f"**📈 {title}**")
-        if not series_dict:
-            st.caption(f"(매칭되는 시계열 없음 — source_tool_call_id={target_id or '없음'})")
+        st.markdown(f"**📊 {title}**  ·  type=`{chart_type}`")
+        if obj is None:
+            st.caption(f"(매칭되는 도구 결과 없음 — source_tool_call_id={target_id or '없음'})")
             return
-        ok = _render_multi_timeseries_chart(st, series_dict)
-        if not ok:
-            st.caption("(시계열 값이 비어있거나 숫자로 변환 불가)")
+
+        try:
+            if chart_type in ("line", "area"):
+                _chart_line_or_area(spec, obj, area=(chart_type == "area"))
+            elif chart_type == "bar":
+                _chart_bar(spec, obj)
+            elif chart_type == "scatter":
+                _chart_scatter(spec, obj)
+            elif chart_type == "histogram":
+                _chart_histogram(spec, obj)
+            elif chart_type == "table":
+                _chart_table(spec, obj)
+            else:
+                st.warning(f"unsupported chart_type: {chart_type}")
+        except Exception as e:  # noqa: BLE001
+            st.warning(f"차트 렌더 실패: {e}")
+
+
+def _chart_line_or_area(spec: dict, obj: Any, *, area: bool) -> None:
+    metric_filter = spec.get("metric_filter") or []
+    series_dict = _extract_timeseries_from_obj(obj)
+    if metric_filter and series_dict:
+        series_dict = {
+            k: v for k, v in series_dict.items()
+            if any(f.lower() in k.lower() for f in metric_filter)
+        } or series_dict
+    if not series_dict:
+        st.caption("(시계열 데이터를 추출하지 못했습니다)")
+        return
+    frames = []
+    for label, pts in series_dict.items():
+        for ts, v in pts:
+            t = _parse_ts(ts)
+            f = _to_float(v)
+            if t is None or f is None:
+                continue
+            frames.append({"ts": t, "label": label, "value": f})
+    if not frames:
+        st.caption("(시계열 값이 비어있거나 숫자로 변환 불가)")
+        return
+    df = pd.DataFrame(frames)
+    pivot = df.pivot_table(index="ts", columns="label", values="value", aggfunc="mean").sort_index()
+    if area:
+        st.area_chart(pivot, height=260)
+    else:
+        st.line_chart(pivot, height=260)
+
+
+def _chart_bar(spec: dict, obj: Any) -> None:
+    x_field = spec.get("x_field")
+    y_field = spec.get("y_field")
+    top_n = spec.get("top_n")
+    if not x_field or not y_field:
+        st.caption("(bar 차트는 x_field 와 y_field 가 필요합니다)")
+        return
+    xs = _resolve_path(obj, x_field)
+    ys = _resolve_path(obj, y_field)
+    if not isinstance(xs, list) or not isinstance(ys, list):
+        st.caption(f"(field 결과가 list 가 아님 — x={type(xs).__name__}, y={type(ys).__name__})")
+        return
+    pairs = []
+    for x, y in zip(xs, ys):
+        f = _to_float(y)
+        if f is None or x is None:
+            continue
+        label = str(x)[:80]
+        pairs.append({"label": label, "value": f})
+    if not pairs:
+        st.caption("(bar 값이 비어있음)")
+        return
+    pairs.sort(key=lambda r: r["value"], reverse=True)
+    if isinstance(top_n, int) and top_n > 0:
+        pairs = pairs[:top_n]
+    df = pd.DataFrame(pairs).set_index("label")
+    st.bar_chart(df, height=max(220, min(500, 30 * len(df) + 80)))
+    with st.expander("📋 데이터 표", expanded=False):
+        st.dataframe(pairs, use_container_width=True, hide_index=True)
+
+
+def _chart_scatter(spec: dict, obj: Any) -> None:
+    x_field = spec.get("x_field"); y_field = spec.get("y_field")
+    if not x_field or not y_field:
+        st.caption("(scatter 차트는 x_field 와 y_field 가 필요합니다)")
+        return
+    xs = _resolve_path(obj, x_field); ys = _resolve_path(obj, y_field)
+    if not isinstance(xs, list) or not isinstance(ys, list):
+        st.caption("(field 결과가 list 가 아님)")
+        return
+    pts = []
+    for x, y in zip(xs, ys):
+        fx = _to_float(x); fy = _to_float(y)
+        if fx is None or fy is None:
+            continue
+        pts.append({"x": fx, "y": fy})
+    if not pts:
+        st.caption("(scatter 값이 비어있음)")
+        return
+    df = pd.DataFrame(pts)
+    st.scatter_chart(df, x="x", y="y", height=300)
+
+
+def _chart_histogram(spec: dict, obj: Any) -> None:
+    field = spec.get("field")
+    bins = spec.get("bins") or 20
+    if not field:
+        st.caption("(histogram 은 field 가 필요합니다)")
+        return
+    raw = _resolve_path(obj, field)
+    if not isinstance(raw, list):
+        st.caption("(field 결과가 list 가 아님)")
+        return
+    nums = []
+    for v in raw:
+        f = _to_float(v) if not isinstance(v, dict) else None
+        if f is None and isinstance(v, dict):
+            for vv in v.values():
+                f = _to_float(vv)
+                if f is not None:
+                    break
+        if f is not None:
+            nums.append(f)
+    if not nums:
+        st.caption("(histogram 으로 쓸 숫자가 없음)")
+        return
+    series = pd.Series(nums, name="value")
+    counts = pd.cut(series, bins=int(bins)).value_counts().sort_index()
+    df = pd.DataFrame({"bucket": counts.index.astype(str), "count": counts.values}).set_index("bucket")
+    st.bar_chart(df, height=240)
+    st.caption(f"n={len(nums)}, bins={bins}")
+
+
+def _chart_table(spec: dict, obj: Any) -> None:
+    rows_field = spec.get("rows_field")
+    columns = spec.get("columns")
+    rows = _resolve_path(obj, rows_field) if rows_field else obj
+    if not isinstance(rows, list):
+        st.caption(f"(rows_field 결과가 list 가 아님 — rows_field={rows_field!r})")
+        return
+    if not rows:
+        st.caption("(rows 가 비어있음)")
+        return
+    if columns:
+        rows = [{c: r.get(c) if isinstance(r, dict) else r for c in columns} for r in rows]
+    flat = [
+        {k: _scalar(v, limit=200) for k, v in (r.items() if isinstance(r, dict) else [("value", r)])}
+        for r in rows[:200]
+    ]
+    st.dataframe(flat, use_container_width=True, hide_index=True)
+    if len(rows) > 200:
+        st.caption(f"표시 200 / 전체 {len(rows)}")
 
 
 def _render_message(m: dict, *, container=None) -> None:
