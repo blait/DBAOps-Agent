@@ -33,3 +33,15 @@ variable "mcp_images_pushed" {
   type        = bool
   default     = false
 }
+
+variable "streamlit_image_pushed" {
+  description = "Streamlit 이미지가 ECR 에 push 된 후 true 로 두 번째 apply (ECS service 생성)"
+  type        = bool
+  default     = false
+}
+
+variable "agentcore_runtime_arn" {
+  description = "Streamlit task 가 사용할 AgentCore Runtime ARN. register_gateway_targets.py 가 만든 후 -var 로 주입. 빈 값이면 UI 가 경고만 표시."
+  type        = string
+  default     = ""
+}

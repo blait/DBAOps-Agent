@@ -282,3 +282,22 @@ module "lambda_community_mysql" {
     MYSQL_PORT       = "3306"
   }
 }
+
+############################################
+# Streamlit UI (CloudFront → ALB → Fargate Spot)
+############################################
+
+module "streamlit" {
+  source = "../../modules/ecs_streamlit"
+
+  environment           = var.environment
+  region                = var.region
+  vpc_id                = module.network.vpc_id
+  public_subnet_ids     = module.network.public_subnet_ids
+  private_subnet_ids    = module.network.private_subnet_ids
+  ecs_cluster_arn       = module.ecs_generators.cluster_arn
+  ecs_cluster_name      = module.ecs_generators.cluster_name
+  gen_security_group_id = module.ecs_generators.task_security_group_id
+  agentcore_runtime_arn = var.agentcore_runtime_arn
+  image_pushed          = var.streamlit_image_pushed
+}

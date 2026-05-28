@@ -146,3 +146,20 @@ output "mcp_lambda_arns" {
     "community-mysql"      = module.lambda_community_mysql.function_arn
   }
 }
+
+############################################
+# Streamlit UI
+############################################
+
+output "streamlit_url" {
+  description = "공개 CloudFront URL"
+  value       = module.streamlit.cloudfront_url
+}
+
+output "streamlit_alb_dns" {
+  value = module.streamlit.alb_dns_name
+}
+
+output "streamlit_repo_url" {
+  value = module.streamlit.streamlit_repo_url
+}
