@@ -162,7 +162,6 @@ aws bedrock-agentcore-control list-agent-runtimes --region ap-northeast-2 --no-c
 
 | 항목 | 요청 |
 |---|---|
-| **Bedrock Claude Opus 4.7 model access** | AWS Console → Bedrock → Model access → Anthropic Claude Opus 4.7 → Request access (콘솔 manual 1회) |
 | **서비스 쿼터** | Fargate Spot vCPU 8 / Lambda 동시 100 / RDS Aurora cluster 1 / RDS instance 1 / MSK Serverless cluster 1 / EC2 t4g 1 |
 | **리전** | ap-northeast-2 (서울) — 단일 |
 | **state bucket 사전 생성 (옵션)** | `dbaops-tfstate-<account>-<region>` S3 + `dbaops-tfstate-lock` DynamoDB. 배포 담당자가 직접 만들 수도 있음 (S3:CreateBucket 권한 부여됨). |

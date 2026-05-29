@@ -10,7 +10,6 @@ DBAOps-Agent **PoC** (test bed 까지 포함된 데모 환경) 를 빈 AWS 계�
 
 - [ ] AWS 계정 (admin 권한 또는 [`docs/iam/IAM_APPLY_GUIDE.md`](iam/IAM_APPLY_GUIDE.md) 의 3 분할 policy 적용)
 - [ ] 본인 PC: AWS CLI v2, Terraform 1.7+, Docker (buildx), Python 3.12+, git, `boto3` (`pip install boto3`)
-- [ ] **Bedrock Claude Opus 4.7 모델 access 활성화** (콘솔 manual)
 - [ ] 리전: `ap-northeast-2` 고정
 
 이 PoC 는 다음 자원을 자기 계정에 자동 생성:
@@ -41,14 +40,8 @@ aws sts get-caller-identity
 
 ---
 
-## 2. Bedrock Claude Opus 4.7 access 활성화
+## 2. Bedrock 모델 호출 가능 여부 확인
 
-콘솔 manual:
-1. AWS Console → Bedrock → 왼쪽 → Model access
-2. `Anthropic Claude Opus 4.7` → Modify → 체크 → Request access
-3. 승인까지 ~수분
-
-검증:
 ```bash
 aws bedrock invoke-model \
   --model-id global.anthropic.claude-opus-4-7 \
@@ -58,7 +51,7 @@ aws bedrock invoke-model \
 cat /tmp/_bedrock.json
 ```
 
-`{"id":"msg_...","type":"message",...}` 면 OK.
+`{"id":"msg_...","type":"message",...}` 면 OK. `AccessDeniedException` 떨어지면 IAM policy 의 `bedrock:InvokeModel` 액션 부여 여부 확인.
 
 ---
 
