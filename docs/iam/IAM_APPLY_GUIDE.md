@@ -13,7 +13,7 @@ DBAOps-Agent **PoC** (testbed: Aurora/MySQL/MSK/EC2/시나리오 generator 까�
 | 파일 | 용도 | 크기 |
 |---|---|---|
 | `dbaops-poc-deployer-policy-1-compute.json` | VPC / ELB / CloudFront / Lambda / ECS / ECR / EventBridge Scheduler | 4,967 자 |
-| `dbaops-poc-deployer-policy-2-data.json` | RDS / MSK / S3 / Secrets | 2,158 자 |
+| `dbaops-poc-deployer-policy-2-data.json` | RDS / MSK / S3 / Secrets / DynamoDB (state lock) | 2,606 자 |
 | `dbaops-poc-deployer-policy-3-iam-auth.json` | IAM / Cognito / Logs / Bedrock / STS | 2,025 자 |
 
 3 개 모두 **customer managed policy 로 만들어 사용자에게 attach**.
@@ -149,9 +149,14 @@ aws iam list-attached-user-policies --user-name "$USER_NAME"
 aws ec2 describe-vpcs --max-items 1 --no-cli-pager
 aws rds describe-db-clusters --max-records 20 --no-cli-pager
 aws kafka list-clusters-v2 --no-cli-pager
+aws s3 ls --no-cli-pager
+aws dynamodb describe-table --table-name dbaops-tfstate-lock --region ap-northeast-2 --no-cli-pager 2>&1 | head -1
 aws bedrock list-foundation-models --region ap-northeast-2 --no-cli-pager \
   --query 'modelSummaries[?contains(modelId,`opus-4`)].modelId'
 aws bedrock-agentcore-control list-agent-runtimes --region ap-northeast-2 --no-cli-pager
+aws bedrock-runtime invoke-model --model-id global.anthropic.claude-opus-4-7 --region ap-northeast-2 \
+  --body '{"messages":[{"role":"user","content":"hi"}],"anthropic_version":"bedrock-2023-05-31","max_tokens":10}' \
+  --cli-binary-format raw-in-base64-out /tmp/_b.json && cat /tmp/_b.json
 ```
 
 모두 성공이어야 함 (RDS/MSK 응답이 비어있어도 권한 OK).

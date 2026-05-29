@@ -43,7 +43,7 @@ aws sts get-caller-identity
 ## 2. Bedrock 모델 호출 가능 여부 확인
 
 ```bash
-aws bedrock invoke-model \
+aws bedrock-runtime invoke-model \
   --model-id global.anthropic.claude-opus-4-7 \
   --region ap-northeast-2 \
   --body '{"messages":[{"role":"user","content":"hi"}],"anthropic_version":"bedrock-2023-05-31","max_tokens":10}' \
