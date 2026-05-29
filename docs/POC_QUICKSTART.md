@@ -8,7 +8,7 @@ DBAOps-Agent **PoC** (test bed 까지 포함된 데모 환경) 를 빈 AWS 계�
 
 ## 0. 들어가기 전에 — 사전 체크
 
-- [ ] AWS 계정 (admin 권한) — 단일 계정
+- [ ] AWS 계정 (admin 권한 또는 [`docs/iam/IAM_APPLY_GUIDE.md`](iam/IAM_APPLY_GUIDE.md) 의 3 분할 policy 적용)
 - [ ] 본인 PC: AWS CLI v2, Terraform 1.7+, Docker (buildx), Python 3.12+, git, `boto3` (`pip install boto3`)
 - [ ] **Bedrock Claude Opus 4.7 모델 access 활성화** (콘솔 manual)
 - [ ] 리전: `ap-northeast-2` 고정
