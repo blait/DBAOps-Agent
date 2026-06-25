@@ -138,6 +138,90 @@ def _health(target: str | None = None) -> dict:
         return {"_error": str(e)}
 
 
+# ─────────────────── RDS / Secret 자동 탐색 (instance role 사용) ───────────────────
+# rds:DescribeDB* + secretsmanager:ListSecrets 권한이면 동작. 드롭박스 선택용.
+
+def _discover_rds(region: str) -> dict:
+    """RDS 인스턴스/클러스터를 조회해 드롭박스 선택지로 반환.
+
+    returns {"pg": [{label, host, port, db_id, ...}], "mysql": [...], "_error": str?}
+    엔진으로 PG/MySQL 분류 (Prometheus/기타는 분류 안 함).
+    """
+    try:
+        import boto3
+        rds = boto3.client("rds", region_name=region)
+    except Exception as e:  # noqa: BLE001
+        return {"_error": f"boto3 init: {e}"}
+
+    pg, mysql = [], []
+    try:
+        # 인스턴스 (RDS PG/MySQL + Aurora 멤버)
+        paginator = rds.get_paginator("describe_db_instances")
+        for page in paginator.paginate():
+            for db in page.get("DBInstances", []):
+                engine = (db.get("Engine") or "").lower()
+                ep = db.get("Endpoint") or {}
+                host = ep.get("Address")
+                if not host:
+                    continue
+                item = {
+                    "db_id": db.get("DBInstanceIdentifier"),
+                    "host": host,
+                    "port": str(ep.get("Port") or ""),
+                    "engine": engine,
+                    "version": db.get("EngineVersion"),
+                    "cluster": db.get("DBClusterIdentifier") or "",
+                    "label": f"{db.get('DBInstanceIdentifier')}  ({engine} {db.get('EngineVersion')})",
+                }
+                if "postgres" in engine:
+                    pg.append(item)
+                elif "mysql" in engine:
+                    mysql.append(item)
+    except Exception as e:  # noqa: BLE001
+        return {"_error": f"describe_db_instances: {e}"}
+
+    # Aurora cluster writer/reader endpoint 도 선택지로 (인스턴스보다 cluster 엔드포인트가 안정적)
+    try:
+        for page in rds.get_paginator("describe_db_clusters").paginate():
+            for c in page.get("DBClusters", []):
+                engine = (c.get("Engine") or "").lower()
+                cid = c.get("DBClusterIdentifier")
+                for role, host in (("writer", c.get("Endpoint")), ("reader", c.get("ReaderEndpoint"))):
+                    if not host:
+                        continue
+                    item = {
+                        "db_id": cid,
+                        "host": host,
+                        "port": str(c.get("Port") or ""),
+                        "engine": engine,
+                        "version": c.get("EngineVersion"),
+                        "cluster": cid,
+                        "label": f"{cid} [{role}]  ({engine})",
+                    }
+                    if "postgres" in engine:
+                        pg.append(item)
+                    elif "mysql" in engine:
+                        mysql.append(item)
+    except Exception:  # noqa: BLE001
+        pass  # cluster describe 실패해도 인스턴스 목록은 유효
+
+    return {"pg": pg, "mysql": mysql}
+
+
+def _discover_secrets(region: str) -> list[str]:
+    """Secrets Manager secret 이름 목록 (DB 자격증명 선택용). 실패 시 빈 목록."""
+    try:
+        import boto3
+        sm = boto3.client("secretsmanager", region_name=region)
+        names = []
+        for page in sm.get_paginator("list_secrets").paginate():
+            for s in page.get("SecretList", []):
+                names.append(s.get("ARN") or s.get("Name"))
+        return names
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def render() -> None:
     st.markdown("### 🔌 MCP 연결 설정")
     st.caption(
@@ -159,12 +243,29 @@ def render() -> None:
         cfg["aws_region"] = c1.text_input("AWS Region", cfg["aws_region"])
         cfg["bedrock_model_id"] = c2.text_input("Bedrock Model ID", cfg["bedrock_model_id"])
 
-    # ─── 라우터 상태 한눈에 ───
-    if st.button("🔄 전체 연결 상태 새로고침"):
+    # ─── 라우터 상태 + RDS 자동 탐색 ───
+    bcols = st.columns(3)
+    if bcols[0].button("🔄 연결 상태 새로고침", use_container_width=True):
         st.session_state["_mcp_health"] = _health()
+    if bcols[1].button("🔍 RDS 자동 탐색", use_container_width=True,
+                       help="rds:Describe 권한으로 인스턴스/클러스터를 조회해 드롭박스로 선택"):
+        st.session_state["_rds_discovered"] = _discover_rds(cfg["aws_region"])
+    if bcols[2].button("🔑 Secret 목록 조회", use_container_width=True,
+                       help="Secrets Manager 의 secret 이름을 가져와 자격증명 드롭박스로"):
+        st.session_state["_secrets_list"] = _discover_secrets(cfg["aws_region"])
+
     health = st.session_state.get("_mcp_health", {})
     if health.get("_error"):
         st.warning(f"라우터 상태 조회 실패: {health['_error']} (라우터가 떠있는지 확인)")
+
+    discovered = st.session_state.get("_rds_discovered", {})
+    if discovered.get("_error"):
+        st.warning(f"RDS 탐색 실패: {discovered['_error']}")
+    elif discovered:
+        st.caption(f"🔍 탐색됨 — PG {len(discovered.get('pg', []))}개 / "
+                   f"MySQL {len(discovered.get('mysql', []))}개 "
+                   "(아래 PostgreSQL/MySQL 카드에서 드롭박스 선택)")
+    secrets_list = st.session_state.get("_secrets_list", [])
 
     # ─── 도구별 카드 ───
     new_tools: dict[str, dict] = {}
@@ -185,17 +286,49 @@ def render() -> None:
             enabled = st.toggle("사용", value=bool(cur.get("enabled")),
                                 key=f"en__{target}")
             conf: dict = {"enabled": enabled}
+
+            # PG/MySQL: RDS 자동 탐색 결과가 있으면 드롭박스로 선택 → host/port/db_id prefill
+            prefill: dict = {}
+            disc_key = {"community-postgres": "pg", "community-mysql": "mysql"}.get(target)
+            if disc_key and discovered.get(disc_key):
+                options = discovered[disc_key]
+                labels = ["(직접 입력)"] + [o["label"] for o in options]
+                sel = st.selectbox("RDS 인스턴스 선택 (자동 탐색)", labels,
+                                   key=f"disc__{target}")
+                if sel != "(직접 입력)":
+                    chosen = next((o for o in options if o["label"] == sel), None)
+                    if chosen:
+                        host_key = "PG_HOST" if disc_key == "pg" else "MYSQL_HOST"
+                        port_key = "PG_PORT" if disc_key == "pg" else "MYSQL_PORT"
+                        prefill = {host_key: chosen["host"], port_key: chosen["port"]}
+                        st.caption(f"→ host `{chosen['host']}` · db_id `{chosen['db_id']}` 자동 입력됨. "
+                                   "user/password 또는 Secret 만 채우세요.")
+
+            # Secret 드롭박스 (PG/MySQL)
+            secret_field = {"community-postgres": "PG_SECRET_ARN",
+                            "community-mysql": "MYSQL_SECRET_ARN"}.get(target)
+            if secret_field and secrets_list:
+                cur_secret = cur.get(secret_field, "")
+                sopts = ["(직접 입력/미사용)"] + secrets_list
+                idx = sopts.index(cur_secret) if cur_secret in sopts else 0
+                ssel = st.selectbox("Secrets Manager 자격증명 선택", sopts, index=idx,
+                                    key=f"secsel__{target}")
+                if ssel != "(직접 입력/미사용)":
+                    prefill[secret_field] = ssel
+
             for fkey, flabel, ftype in meta["fields"]:
-                val = cur.get(fkey, "")
+                val = prefill.get(fkey, cur.get(fkey, ""))
+                # prefill 된 필드는 key 에 값 해시를 섞어 위젯을 새로 그린다
+                # (selectbox 선택을 text_input 기본값에 즉시 반영하기 위함).
+                wkey = f"f__{target}__{fkey}"
+                if fkey in prefill:
+                    wkey += f"__{hash(str(val)) & 0xffff}"
                 if ftype == "password":
-                    conf[fkey] = st.text_input(flabel, value=val, type="password",
-                                               key=f"f__{target}__{fkey}")
+                    conf[fkey] = st.text_input(flabel, value=val, type="password", key=wkey)
                 elif ftype == "number":
-                    conf[fkey] = st.text_input(flabel, value=str(val) if val else "",
-                                               key=f"f__{target}__{fkey}")
+                    conf[fkey] = st.text_input(flabel, value=str(val) if val else "", key=wkey)
                 else:
-                    conf[fkey] = st.text_input(flabel, value=val,
-                                               key=f"f__{target}__{fkey}")
+                    conf[fkey] = st.text_input(flabel, value=val, key=wkey)
             # 빈 문자열 필드는 굳이 저장하지 않음 (Secret/직접입력 혼동 방지)
             conf = {k: v for k, v in conf.items() if k == "enabled" or v}
             new_tools[target] = conf
