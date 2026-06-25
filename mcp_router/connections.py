@@ -47,13 +47,21 @@ STDIO_TARGETS = {
     "awslabs-aws-api",
 }
 
+# 연결 정보 없이 instance role 만으로 동작하는 도구 — connections.json 이 없어도 기본 ON.
+# (PG/MySQL/Prometheus/MSK 는 연결 정보가 필요하므로 기본 OFF — UI 에서 채운 뒤 켜진다.)
+NO_CONFIG_TARGETS = {
+    "rds-pi", "s3-log-fetch", "aws-api",
+    "awslabs-cloudwatch", "awslabs-aws-doc", "awslabs-aws-api",
+}
+
 
 _DEFAULTS: dict[str, Any] = {
     "aws_region": os.environ.get("AWS_REGION", "ap-northeast-2"),
     "bedrock_model_id": os.environ.get(
         "BEDROCK_MODEL_ID", "global.anthropic.claude-opus-4-7"
     ),
-    "tools": {t: {"enabled": False} for t in ALL_TARGETS},
+    # 연결정보 불필요 도구는 기본 ON, 나머지는 OFF (연결정보 채운 뒤 켜야 함).
+    "tools": {t: {"enabled": t in NO_CONFIG_TARGETS} for t in ALL_TARGETS},
     "infra_context": {
         "prom_instance_id": "",
         "aurora_cluster_id": "",

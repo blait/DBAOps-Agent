@@ -299,12 +299,16 @@ def _render_tool_card(target: str, cfg: dict, disc: dict, secrets: list[str],
     meta = _TARGET_META[target]
     cur = cfg["tools"].get(target, {})
     hstat = health.get(target, {}) if isinstance(health, dict) else {}
+    needs_config = target not in _NO_CONFIG
+    # 디폴트는 "사용"(ON). 저장된 값이 있으면 그 값을 따른다.
+    default_on = cur.get("enabled", True)
     badge = _badge(hstat)
-    title = f"{meta['label']}   ·   `{target}`" + (f"   {badge}" if badge else "")
+    title = f"{'🟢' if default_on else '⚪'} {meta['label']}   ·   `{target}`" + (f"   {badge}" if badge else "")
 
-    with st.expander(title, expanded=bool(cur.get("enabled"))):
+    # 설정이 필요한 도구(DB/Prometheus/MSK)만 펼치고, instance-role 도구는 접어둔다.
+    with st.expander(title, expanded=bool(default_on) and needs_config):
         st.caption(meta["desc"])
-        enabled = st.toggle("이 도구 사용", value=bool(cur.get("enabled")), key=f"en__{target}")
+        enabled = st.toggle("이 도구 사용", value=default_on, key=f"en__{target}")
         conf: dict = {"enabled": enabled}
 
         if not enabled:
