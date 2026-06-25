@@ -3,10 +3,10 @@
 connections.json(라우터와 공유, 기본 /data/connections.json)을 read/write 하고,
 mcp-router 의 /healthz?tool=<target> 로 연결 테스트를 수행한다.
 
-- 도구별 enabled 토글 + 연결 필드(host/port/db/user/password/url/region…)
-- 저장 → connections.json write → 라우터가 mtime 감지해 자동 reload
-- "연결 테스트" → 라우터 healthz 호출 → 해당 세션 tools/list 성공 여부
-- infra_context(aurora writer id 등) 편집
+핵심 UX:
+- 페이지 진입 시 instance role 로 AWS 리소스(RDS/EC2/S3/MSK/Secret)를 자동 탐색해
+  거의 모든 입력을 **드롭박스**로 제공. 권한이 없으면 조용히 직접입력으로 fallback.
+- 도구를 카테고리(DB/메트릭/로그/AWS)로 그룹화. 상단에 상태 대시보드.
 """
 
 from __future__ import annotations
@@ -29,89 +29,69 @@ ALL_TARGETS = [
     "awslabs-cloudwatch", "awslabs-aws-doc", "awslabs-aws-api",
 ]
 
-# target → (한글 라벨, 설명, 연결 필드 정의). 필드: (key, label, type) type ∈ {text, password, number}
-_TARGET_META: dict[str, dict] = {
-    "community-prometheus": {
-        "label": "Prometheus (self-hosted)",
-        "desc":  "node_exporter 등 호스트 메트릭. PromQL 쿼리.",
-        "fields": [("PROMETHEUS_URL", "Prometheus URL (예: http://10.0.1.5:9090)", "text")],
-    },
-    "community-postgres": {
-        "label": "PostgreSQL / Aurora PG",
-        "desc":  "read-only SQL / EXPLAIN / health. user-pass 또는 Secret ARN 중 하나.",
-        "fields": [
-            ("PG_HOST", "Host", "text"),
-            ("PG_PORT", "Port", "number"),
-            ("PG_DBNAME", "Database", "text"),
-            ("PG_USER", "User (Secret 미사용 시)", "text"),
-            ("PG_PASSWORD", "Password (Secret 미사용 시)", "password"),
-            ("PG_SECRET_ARN", "Secrets Manager ARN (선택)", "text"),
-            ("PG_SSLMODE", "sslmode (require/disable)", "text"),
-        ],
-    },
-    "community-mysql": {
-        "label": "MySQL / RDS MySQL",
-        "desc":  "read-only SELECT / EXPLAIN. user-pass 또는 Secret ARN.",
-        "fields": [
-            ("MYSQL_HOST", "Host", "text"),
-            ("MYSQL_PORT", "Port", "number"),
-            ("MYSQL_DB", "Database", "text"),
-            ("MYSQL_USER", "User (Secret 미사용 시)", "text"),
-            ("MYSQL_PASSWORD", "Password (Secret 미사용 시)", "password"),
-            ("MYSQL_SECRET_ARN", "Secrets Manager ARN (선택)", "text"),
-        ],
-    },
-    "awslabs-cloudwatch": {
-        "label": "CloudWatch (awslabs)",
-        "desc":  "메트릭/알람/Logs Insights. EC2 instance role 권한 사용 — 추가 입력 없음.",
-        "fields": [],
-    },
-    "awslabs-aws-doc": {
-        "label": "AWS Documentation (awslabs)",
-        "desc":  "AWS 공식 문서 검색/조회. 외부 docs.aws.amazon.com — 추가 입력 없음.",
-        "fields": [],
-    },
-    "awslabs-aws-api": {
-        "label": "AWS API CLI (awslabs, read-only)",
-        "desc":  "임의 read-only AWS CLI 명령. instance role 권한 사용.",
-        "fields": [],
-    },
-    "rds-pi": {
-        "label": "RDS Performance Insights (커스텀)",
-        "desc":  "top SQL by AAS. instance role 의 pi:* 권한 사용 — 추가 입력 없음.",
-        "fields": [],
-    },
-    "msk-metrics": {
-        "label": "MSK / Kafka 메트릭 (커스텀)",
-        "desc":  "AWS/Kafka CloudWatch 메트릭. 기본 토픽/CG 지정 가능.",
-        "fields": [
-            ("KAFKA_CLUSTER_NAME", "MSK Cluster Name", "text"),
-            ("KAFKA_DEFAULT_TOPIC", "기본 Topic", "text"),
-            ("KAFKA_DEFAULT_CG", "기본 Consumer Group", "text"),
-        ],
-    },
-    "s3-log-fetch": {
-        "label": "S3 로그 조회 (커스텀)",
-        "desc":  "S3 gzip 로그 byte-range + regex. instance role 의 s3 read 권한 사용.",
-        "fields": [],
-    },
-    "aws-api": {
-        "label": "AWS API 묶음 (커스텀, read-only)",
-        "desc":  "RDS/EC2/MSK describe + PI dimension. instance role 권한 사용.",
-        "fields": [],
-    },
-}
-
-_INFRA_FIELDS = [
-    ("aurora_cluster_id", "Aurora/PG 클러스터 ID"),
-    ("aurora_writer_id",  "Aurora/PG writer 인스턴스 ID"),
-    ("aurora_reader_id",  "Aurora/PG reader 인스턴스 ID"),
-    ("mysql_db_id",       "MySQL 인스턴스 ID"),
-    ("prom_instance_id",  "Prometheus 호스트 EC2 instance-id"),
-    ("msk_cluster_name",  "MSK 클러스터 이름"),
-    ("log_bucket",        "로그 S3 버킷명"),
+# 카테고리별 그룹 (UI 그룹화)
+_CATEGORIES = [
+    ("🗄️ 데이터베이스 분석", ["community-postgres", "community-mysql", "rds-pi"]),
+    ("📊 인프라 메트릭",      ["community-prometheus", "awslabs-cloudwatch", "msk-metrics"]),
+    ("📜 로그 분석",          ["s3-log-fetch"]),
+    ("☁️ AWS 범용 도구",      ["aws-api", "awslabs-aws-api", "awslabs-aws-doc"]),
 ]
 
+_TARGET_META: dict[str, dict] = {
+    "community-prometheus": {"label": "Prometheus (self-hosted)",
+                             "desc": "node_exporter 등 호스트 메트릭. PromQL 쿼리."},
+    "community-postgres":   {"label": "PostgreSQL / Aurora PG",
+                             "desc": "read-only SQL / EXPLAIN / health 분석."},
+    "community-mysql":      {"label": "MySQL / RDS MySQL",
+                             "desc": "read-only SELECT / EXPLAIN / slow_log."},
+    "awslabs-cloudwatch":   {"label": "CloudWatch",
+                             "desc": "메트릭 / 알람 / Logs Insights. instance role 사용."},
+    "awslabs-aws-doc":      {"label": "AWS Documentation",
+                             "desc": "AWS 공식 문서 검색·조회 (외부)."},
+    "awslabs-aws-api":      {"label": "AWS API CLI (read-only)",
+                             "desc": "임의 read-only AWS CLI 명령."},
+    "rds-pi":               {"label": "RDS Performance Insights",
+                             "desc": "top SQL by AAS. instance role 의 pi:* 사용."},
+    "msk-metrics":          {"label": "MSK / Kafka 메트릭",
+                             "desc": "AWS/Kafka CloudWatch 메트릭."},
+    "s3-log-fetch":         {"label": "S3 로그 조회",
+                             "desc": "S3 gzip 로그 byte-range + regex."},
+    "aws-api":              {"label": "AWS API 묶음 (read-only)",
+                             "desc": "RDS/EC2/MSK describe + PI dimension."},
+}
+
+# 추가 설정이 필요 없는(instance role 만으로 동작) 도구
+_NO_CONFIG = {"awslabs-cloudwatch", "awslabs-aws-doc", "awslabs-aws-api",
+              "rds-pi", "s3-log-fetch", "aws-api"}
+
+_INFRA_FIELDS = [
+    ("aurora_cluster_id", "Aurora/PG 클러스터 ID", "clusters"),
+    ("aurora_writer_id",  "Aurora/PG writer 인스턴스 ID", "instances"),
+    ("aurora_reader_id",  "Aurora/PG reader 인스턴스 ID", "instances"),
+    ("mysql_db_id",       "MySQL 인스턴스 ID", "instances"),
+    ("prom_instance_id",  "Prometheus 호스트 EC2 instance-id", "ec2_ids"),
+    ("msk_cluster_name",  "MSK 클러스터 이름", "msk"),
+    ("log_bucket",        "로그 S3 버킷명", "s3_buckets"),
+]
+
+_REGIONS = [
+    "ap-northeast-2", "ap-northeast-1", "ap-southeast-1", "ap-southeast-2", "ap-south-1",
+    "us-east-1", "us-east-2", "us-west-1", "us-west-2",
+    "eu-west-1", "eu-west-2", "eu-central-1",
+]
+
+_BEDROCK_MODELS = [
+    "global.anthropic.claude-opus-4-8",
+    "global.anthropic.claude-opus-4-7",
+    "us.anthropic.claude-opus-4-7",
+    "us.anthropic.claude-sonnet-4-6",
+    "apac.anthropic.claude-sonnet-4-6",
+]
+
+_SSLMODES = ["require", "prefer", "disable", "verify-ca", "verify-full"]
+
+
+# ─────────────────────────── 저장소 / 라우터 ───────────────────────────
 
 def _load() -> dict:
     try:
@@ -138,98 +118,309 @@ def _health(target: str | None = None) -> dict:
         return {"_error": str(e)}
 
 
-# ─────────────────── RDS / Secret 자동 탐색 (instance role 사용) ───────────────────
-# rds:DescribeDB* + secretsmanager:ListSecrets 권한이면 동작. 드롭박스 선택용.
+# ─────────────────── AWS 리소스 자동 탐색 (instance role) ───────────────────
+# 각 sub-discover 는 독립 try/except — 권한 없으면 해당 항목만 빈 목록, 전체는 계속.
 
-def _discover_rds(region: str) -> dict:
-    """RDS 인스턴스/클러스터를 조회해 드롭박스 선택지로 반환.
-
-    returns {"pg": [{label, host, port, db_id, ...}], "mysql": [...], "_error": str?}
-    엔진으로 PG/MySQL 분류 (Prometheus/기타는 분류 안 함).
-    """
+def _discover_aws(region: str) -> dict:
+    out: dict = {
+        "pg": [], "mysql": [], "clusters": [], "instances": [],
+        "ec2": [], "s3_buckets": [], "msk": [], "errors": {},
+    }
     try:
         import boto3
-        rds = boto3.client("rds", region_name=region)
     except Exception as e:  # noqa: BLE001
-        return {"_error": f"boto3 init: {e}"}
+        out["errors"]["boto3"] = str(e)
+        return out
 
-    pg, mysql = [], []
+    # RDS 인스턴스
     try:
-        # 인스턴스 (RDS PG/MySQL + Aurora 멤버)
-        paginator = rds.get_paginator("describe_db_instances")
-        for page in paginator.paginate():
+        rds = boto3.client("rds", region_name=region)
+        for page in rds.get_paginator("describe_db_instances").paginate():
             for db in page.get("DBInstances", []):
                 engine = (db.get("Engine") or "").lower()
                 ep = db.get("Endpoint") or {}
-                host = ep.get("Address")
+                host, dbid = ep.get("Address"), db.get("DBInstanceIdentifier")
+                if dbid:
+                    out["instances"].append(dbid)
                 if not host:
                     continue
-                item = {
-                    "db_id": db.get("DBInstanceIdentifier"),
-                    "host": host,
-                    "port": str(ep.get("Port") or ""),
-                    "engine": engine,
-                    "version": db.get("EngineVersion"),
-                    "cluster": db.get("DBClusterIdentifier") or "",
-                    "label": f"{db.get('DBInstanceIdentifier')}  ({engine} {db.get('EngineVersion')})",
-                }
+                item = {"db_id": dbid, "host": host, "port": str(ep.get("Port") or ""),
+                        "engine": engine, "version": db.get("EngineVersion"),
+                        "label": f"{dbid}  ·  {engine} {db.get('EngineVersion') or ''}".strip()}
                 if "postgres" in engine:
-                    pg.append(item)
+                    out["pg"].append(item)
                 elif "mysql" in engine:
-                    mysql.append(item)
+                    out["mysql"].append(item)
     except Exception as e:  # noqa: BLE001
-        return {"_error": f"describe_db_instances: {e}"}
+        out["errors"]["rds_instances"] = str(e)
 
-    # Aurora cluster writer/reader endpoint 도 선택지로 (인스턴스보다 cluster 엔드포인트가 안정적)
+    # RDS 클러스터 (Aurora writer/reader 엔드포인트)
     try:
+        rds = boto3.client("rds", region_name=region)
         for page in rds.get_paginator("describe_db_clusters").paginate():
             for c in page.get("DBClusters", []):
-                engine = (c.get("Engine") or "").lower()
-                cid = c.get("DBClusterIdentifier")
+                engine, cid = (c.get("Engine") or "").lower(), c.get("DBClusterIdentifier")
+                if cid:
+                    out["clusters"].append(cid)
                 for role, host in (("writer", c.get("Endpoint")), ("reader", c.get("ReaderEndpoint"))):
                     if not host:
                         continue
-                    item = {
-                        "db_id": cid,
-                        "host": host,
-                        "port": str(c.get("Port") or ""),
-                        "engine": engine,
-                        "version": c.get("EngineVersion"),
-                        "cluster": cid,
-                        "label": f"{cid} [{role}]  ({engine})",
-                    }
+                    item = {"db_id": cid, "host": host, "port": str(c.get("Port") or ""),
+                            "engine": engine, "version": c.get("EngineVersion"),
+                            "label": f"{cid} [{role}]  ·  {engine}"}
                     if "postgres" in engine:
-                        pg.append(item)
+                        out["pg"].append(item)
                     elif "mysql" in engine:
-                        mysql.append(item)
-    except Exception:  # noqa: BLE001
-        pass  # cluster describe 실패해도 인스턴스 목록은 유효
+                        out["mysql"].append(item)
+    except Exception as e:  # noqa: BLE001
+        out["errors"]["rds_clusters"] = str(e)
 
-    return {"pg": pg, "mysql": mysql}
+    # EC2 (Prometheus 호스트 후보)
+    try:
+        ec2 = boto3.client("ec2", region_name=region)
+        for page in ec2.get_paginator("describe_instances").paginate():
+            for r in page.get("Reservations", []):
+                for inst in r.get("Instances", []):
+                    if (inst.get("State") or {}).get("Name") != "running":
+                        continue
+                    tags = {t["Key"]: t["Value"] for t in (inst.get("Tags") or [])}
+                    iid, ip = inst.get("InstanceId"), inst.get("PrivateIpAddress")
+                    name = tags.get("Name", "")
+                    out["ec2"].append({"id": iid, "ip": ip, "name": name,
+                                       "label": f"{name or iid}  ·  {ip}"})
+    except Exception as e:  # noqa: BLE001
+        out["errors"]["ec2"] = str(e)
+
+    # S3 버킷
+    try:
+        s3 = boto3.client("s3", region_name=region)
+        for b in s3.list_buckets().get("Buckets", []):
+            out["s3_buckets"].append(b["Name"])
+    except Exception as e:  # noqa: BLE001
+        out["errors"]["s3"] = str(e)
+
+    # MSK 클러스터
+    try:
+        kafka = boto3.client("kafka", region_name=region)
+        try:
+            pages = kafka.get_paginator("list_clusters_v2").paginate()
+        except Exception:  # noqa: BLE001
+            pages = [kafka.list_clusters_v2()]
+        for page in pages:
+            for c in page.get("ClusterInfoList", []):
+                if c.get("ClusterName"):
+                    out["msk"].append(c["ClusterName"])
+    except Exception as e:  # noqa: BLE001
+        out["errors"]["msk"] = str(e)
+
+    return out
 
 
-def _discover_secrets(region: str) -> list[str]:
-    """Secrets Manager secret 이름 목록 (DB 자격증명 선택용). 실패 시 빈 목록."""
+def _bedrock_models(region: str) -> list[str]:
+    """정적 목록 + (가능하면) list_inference_profiles 동적 보강."""
+    models = list(_BEDROCK_MODELS)
     try:
         import boto3
-        sm = boto3.client("secretsmanager", region_name=region)
-        names = []
-        for page in sm.get_paginator("list_secrets").paginate():
-            for s in page.get("SecretList", []):
-                names.append(s.get("ARN") or s.get("Name"))
-        return names
+        b = boto3.client("bedrock", region_name=region)
+        for p in b.get_paginator("list_inference_profiles").paginate():
+            for ip in p.get("inferenceProfileSummaries", []):
+                pid = ip.get("inferenceProfileId")
+                if pid and ("opus" in pid or "sonnet" in pid) and pid not in models:
+                    models.append(pid)
     except Exception:  # noqa: BLE001
-        return []
+        pass
+    return models
 
+
+# ─────────────────────────── 위젯 헬퍼 ───────────────────────────
+
+def _select_or_text(label: str, options: list[str], current: str, key: str,
+                    help: str | None = None, placeholder: str = "") -> str:
+    """탐색된 options 가 있으면 드롭박스(+직접입력), 없으면 text_input.
+
+    options 의 항목은 value 와 동일(문자열). host 처럼 label≠value 인 경우는 _instance_picker.
+    """
+    options = [o for o in options if o]
+    if not options:
+        return st.text_input(label, value=current, key=key, help=help, placeholder=placeholder)
+
+    DIRECT = "✏️ 직접 입력"
+    NONE = "— 선택 안 함 —"
+    choices = [NONE, DIRECT] + options
+    if current and current in options:
+        idx = choices.index(current)
+    elif current:
+        idx = 1  # 직접 입력 모드
+    else:
+        idx = 0
+    sel = st.selectbox(label, choices, index=idx, key=f"{key}__sel", help=help)
+    if sel == DIRECT:
+        return st.text_input(f"↳ {label} 직접 입력", value=current, key=f"{key}__txt",
+                             placeholder=placeholder, label_visibility="collapsed")
+    if sel == NONE:
+        return ""
+    return sel
+
+
+def _instance_picker(label: str, instances: list[dict], key: str) -> dict | None:
+    """RDS 인스턴스 드롭박스 → 선택된 {host, port, db_id, engine} 또는 None."""
+    if not instances:
+        return None
+    labels = ["— 직접 입력 —"] + [o["label"] for o in instances]
+    sel = st.selectbox(label, labels, key=key)
+    if sel == "— 직접 입력 —":
+        return None
+    return next((o for o in instances if o["label"] == sel), None)
+
+
+def _badge(hstat: dict) -> str:
+    if not hstat:
+        return ""
+    if hstat.get("ok") is True:
+        return f"🟢 {hstat.get('tools', 0)} tools"
+    if hstat.get("ok") is False:
+        return "🔴 연결 실패"
+    return ""
+
+
+def _text_with_prefill(label: str, value: str, base_key: str, prefilled: bool,
+                       kind: str = "text", placeholder: str = "") -> str:
+    """prefill 된 값은 위젯 key 에 값 해시를 섞어 강제 리렌더(드롭박스 선택 즉시 반영)."""
+    wkey = base_key + (f"__{hash(str(value)) & 0xffff}" if prefilled else "")
+    if kind == "password":
+        return st.text_input(label, value=value, type="password", key=wkey, placeholder=placeholder)
+    return st.text_input(label, value=value, key=wkey, placeholder=placeholder)
+
+
+# ─────────────────────────── 도구 카드 ───────────────────────────
+
+def _render_tool_card(target: str, cfg: dict, disc: dict, secrets: list[str],
+                      health: dict) -> dict:
+    meta = _TARGET_META[target]
+    cur = cfg["tools"].get(target, {})
+    hstat = health.get(target, {}) if isinstance(health, dict) else {}
+    badge = _badge(hstat)
+    title = f"{meta['label']}   ·   `{target}`" + (f"   {badge}" if badge else "")
+
+    with st.expander(title, expanded=bool(cur.get("enabled"))):
+        st.caption(meta["desc"])
+        enabled = st.toggle("이 도구 사용", value=bool(cur.get("enabled")), key=f"en__{target}")
+        conf: dict = {"enabled": enabled}
+
+        if not enabled:
+            st.caption("⏸️ 비활성 — 켜면 설정 항목이 나타납니다.")
+            return conf
+
+        # ── DB: PostgreSQL / MySQL ──
+        if target in ("community-postgres", "community-mysql"):
+            is_pg = target == "community-postgres"
+            opts = disc.get("pg" if is_pg else "mysql", [])
+            HK = "PG_HOST" if is_pg else "MYSQL_HOST"
+            PK = "PG_PORT" if is_pg else "MYSQL_PORT"
+            DK = "PG_DBNAME" if is_pg else "MYSQL_DB"
+            UK = "PG_USER" if is_pg else "MYSQL_USER"
+            PWK = "PG_PASSWORD" if is_pg else "MYSQL_PASSWORD"
+            SK = "PG_SECRET_ARN" if is_pg else "MYSQL_SECRET_ARN"
+
+            picked = _instance_picker("① RDS 인스턴스 선택 (자동 탐색)", opts, key=f"pick__{target}")
+            host_val = picked["host"] if picked else cur.get(HK, "")
+            port_val = picked["port"] if picked else cur.get(PK, str(5432 if is_pg else 3306))
+            if picked:
+                st.success(f"✅ {picked['db_id']} → `{picked['host']}:{picked['port']}`")
+
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                conf[HK] = _text_with_prefill("② Host", host_val, f"h__{target}", bool(picked),
+                                              placeholder="xxx.rds.amazonaws.com")
+            with c2:
+                conf[PK] = _text_with_prefill("Port", str(port_val), f"p__{target}", bool(picked))
+            conf[DK] = st.text_input("③ Database", value=cur.get(DK, "postgres" if is_pg else "mysql"),
+                                     key=f"db__{target}")
+
+            st.markdown("**④ 인증 방식**")
+            has_secret = bool(cur.get(SK))
+            mode = st.radio("auth", ["🔑 Secrets Manager", "👤 User / Password 직접"],
+                            index=0 if (has_secret or secrets) else 1,
+                            horizontal=True, label_visibility="collapsed", key=f"auth__{target}")
+            if mode.startswith("🔑"):
+                conf[SK] = _select_or_text("Secret (ARN/이름)", secrets, cur.get(SK, ""),
+                                           key=f"sec__{target}",
+                                           placeholder="arn:aws:secretsmanager:...:secret:DB...")
+            else:
+                ac1, ac2 = st.columns(2)
+                with ac1:
+                    conf[UK] = st.text_input("User", value=cur.get(UK, ""), key=f"u__{target}")
+                with ac2:
+                    conf[PWK] = st.text_input("Password", value=cur.get(PWK, ""), type="password",
+                                              key=f"pw__{target}")
+
+            if is_pg:
+                cur_ssl = cur.get("PG_SSLMODE", "require")
+                conf["PG_SSLMODE"] = st.selectbox(
+                    "⑤ SSL mode", _SSLMODES,
+                    index=_SSLMODES.index(cur_ssl) if cur_ssl in _SSLMODES else 0,
+                    key=f"ssl__{target}")
+
+        # ── Prometheus ──
+        elif target == "community-prometheus":
+            ec2 = disc.get("ec2", [])
+            url_val = cur.get("PROMETHEUS_URL", "")
+            if ec2:
+                labels = ["— 직접 입력 —"] + [f"{o['label']}  → :9090" for o in ec2]
+                sel = st.selectbox("Prometheus 호스트 (EC2 자동 탐색)", labels, key=f"prom_ec2__{target}")
+                if sel != "— 직접 입력 —":
+                    chosen = ec2[labels.index(sel) - 1]
+                    url_val = f"http://{chosen['ip']}:9090"
+                    st.success(f"✅ {chosen['label']} → `{url_val}`")
+                    conf["PROMETHEUS_URL"] = _text_with_prefill(
+                        "Prometheus URL", url_val, f"prurl__{target}", True)
+                else:
+                    conf["PROMETHEUS_URL"] = st.text_input(
+                        "Prometheus URL", value=url_val, key=f"prurl2__{target}",
+                        placeholder="http://10.0.1.5:9090")
+            else:
+                conf["PROMETHEUS_URL"] = st.text_input(
+                    "Prometheus URL", value=url_val, key=f"prurl3__{target}",
+                    placeholder="http://10.0.1.5:9090")
+
+        # ── MSK metrics ──
+        elif target == "msk-metrics":
+            conf["KAFKA_CLUSTER_NAME"] = _select_or_text(
+                "MSK Cluster Name", disc.get("msk", []), cur.get("KAFKA_CLUSTER_NAME", ""),
+                key=f"msk__{target}")
+            mc1, mc2 = st.columns(2)
+            with mc1:
+                conf["KAFKA_DEFAULT_TOPIC"] = st.text_input(
+                    "기본 Topic", value=cur.get("KAFKA_DEFAULT_TOPIC", ""), key=f"topic__{target}")
+            with mc2:
+                conf["KAFKA_DEFAULT_CG"] = st.text_input(
+                    "기본 Consumer Group", value=cur.get("KAFKA_DEFAULT_CG", ""), key=f"cg__{target}")
+
+        # ── 추가 설정 불필요 ──
+        elif target in _NO_CONFIG:
+            st.caption("➕ 추가 연결 정보 불필요 — EC2 instance role 권한으로 동작합니다.")
+
+        # 빈 문자열 필드 제거
+        conf = {k: v for k, v in conf.items() if k == "enabled" or v}
+
+        # 카드별 연결 테스트
+        if st.button("🔌 연결 테스트", key=f"test__{target}"):
+            cfg["tools"][target] = conf
+            _save(cfg)
+            res = _health(target)
+            st.session_state["_mcp_health"] = {**health, **(res if isinstance(res, dict) else {})}
+            one = res.get(target, {}) if isinstance(res, dict) else {}
+            if one.get("ok"):
+                st.success(f"✅ 연결 성공 — {one.get('tools', 0)} tools")
+            else:
+                st.error(f"❌ {one.get('error', res.get('_error', 'unknown'))}")
+
+    return conf
+
+
+# ─────────────────────────── 메인 ───────────────────────────
 
 def render() -> None:
-    st.markdown("### 🔌 MCP 연결 설정")
-    st.caption(
-        "각 분석 도구가 붙을 대상(DB / Prometheus / AWS)을 설정합니다. "
-        "저장하면 라우터가 자동으로 반영합니다. "
-        f"설정 파일: `{CONNECTIONS_PATH}`"
-    )
-
     cfg = _load()
     cfg.setdefault("aws_region", os.environ.get("AWS_REGION", "ap-northeast-2"))
     cfg.setdefault("bedrock_model_id",
@@ -237,131 +428,114 @@ def render() -> None:
     cfg.setdefault("tools", {})
     cfg.setdefault("infra_context", {})
 
-    # ─── 전역 ───
-    with st.container(border=True):
-        c1, c2 = st.columns(2)
-        cfg["aws_region"] = c1.text_input("AWS Region", cfg["aws_region"])
-        cfg["bedrock_model_id"] = c2.text_input("Bedrock Model ID", cfg["bedrock_model_id"])
+    st.markdown("### 🔌 MCP 연결 설정")
+    st.caption("분석 도구가 붙을 대상(DB·Prometheus·AWS)을 설정합니다. "
+               "AWS 리소스는 자동 탐색되어 드롭박스로 선택할 수 있습니다.")
 
-    # ─── 라우터 상태 + RDS 자동 탐색 ───
-    bcols = st.columns(3)
-    if bcols[0].button("🔄 연결 상태 새로고침", use_container_width=True):
-        st.session_state["_mcp_health"] = _health()
-    if bcols[1].button("🔍 RDS 자동 탐색", use_container_width=True,
-                       help="rds:Describe 권한으로 인스턴스/클러스터를 조회해 드롭박스로 선택"):
-        st.session_state["_rds_discovered"] = _discover_rds(cfg["aws_region"])
-    if bcols[2].button("🔑 Secret 목록 조회", use_container_width=True,
-                       help="Secrets Manager 의 secret 이름을 가져와 자격증명 드롭박스로"):
-        st.session_state["_secrets_list"] = _discover_secrets(cfg["aws_region"])
-
+    # 자동 탐색 (1회 캐싱)
+    if "_aws_disc" not in st.session_state:
+        with st.spinner("AWS 리소스 자동 탐색 중…"):
+            st.session_state["_aws_disc"] = _discover_aws(cfg["aws_region"])
+    if "_bedrock_models" not in st.session_state:
+        st.session_state["_bedrock_models"] = _bedrock_models(cfg["aws_region"])
+    disc = st.session_state["_aws_disc"]
     health = st.session_state.get("_mcp_health", {})
-    if health.get("_error"):
-        st.warning(f"라우터 상태 조회 실패: {health['_error']} (라우터가 떠있는지 확인)")
+    secrets = st.session_state.get("_secrets_list", [])
 
-    discovered = st.session_state.get("_rds_discovered", {})
-    if discovered.get("_error"):
-        st.warning(f"RDS 탐색 실패: {discovered['_error']}")
-    elif discovered:
-        st.caption(f"🔍 탐색됨 — PG {len(discovered.get('pg', []))}개 / "
-                   f"MySQL {len(discovered.get('mysql', []))}개 "
-                   "(아래 PostgreSQL/MySQL 카드에서 드롭박스 선택)")
-    secrets_list = st.session_state.get("_secrets_list", [])
+    # ── 상태 대시보드 ──
+    enabled_n = sum(1 for t in ALL_TARGETS if cfg["tools"].get(t, {}).get("enabled"))
+    ok_n = sum(1 for t, s in health.items()
+               if isinstance(s, dict) and s.get("ok") is True) if isinstance(health, dict) else 0
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("활성 도구", f"{enabled_n} / {len(ALL_TARGETS)}")
+    d2.metric("연결 OK", ok_n if health and not health.get("_error") else "—")
+    d3.metric("탐색된 DB", f"{len(disc.get('pg', [])) + len(disc.get('mysql', []))}")
+    d4.metric("리전", cfg["aws_region"])
 
-    # ─── 도구별 카드 ───
-    new_tools: dict[str, dict] = {}
-    for target in ALL_TARGETS:
-        meta = _TARGET_META[target]
-        cur = cfg["tools"].get(target, {})
-        hstat = health.get(target, {}) if isinstance(health, dict) else {}
+    # ── 상단 액션바 ──
+    a1, a2, a3 = st.columns(3)
+    if a1.button("🔄 연결 상태 확인", use_container_width=True):
+        st.session_state["_mcp_health"] = _health()
+        st.rerun()
+    if a2.button("🔍 AWS 리소스 다시 탐색", use_container_width=True):
+        st.session_state["_aws_disc"] = _discover_aws(cfg["aws_region"])
+        st.session_state.pop("_bedrock_models", None)
+        st.rerun()
+    if a3.button("🔑 Secret 목록 불러오기", use_container_width=True,
+                 help="Secrets Manager 의 secret 을 자격증명 드롭박스로"):
+        try:
+            import boto3
+            sm = boto3.client("secretsmanager", region_name=cfg["aws_region"])
+            names = []
+            for page in sm.get_paginator("list_secrets").paginate():
+                names += [s.get("ARN") or s.get("Name") for s in page.get("SecretList", [])]
+            st.session_state["_secrets_list"] = [n for n in names if n]
+            st.rerun()
+        except Exception as e:  # noqa: BLE001
+            st.warning(f"Secret 목록 실패(권한 확인): {e}")
 
-        badge = ""
-        if hstat.get("ok") is True:
-            badge = f"  ✅ {hstat.get('tools', 0)} tools"
-        elif hstat.get("ok") is False:
-            badge = "  ❌ 연결 실패"
+    if isinstance(health, dict) and health.get("_error"):
+        st.warning(f"라우터 상태 조회 실패: {health['_error']}")
+    if disc.get("errors"):
+        with st.expander(f"⚠️ 일부 탐색 권한 없음 ({len(disc['errors'])}) — 직접 입력으로 대체됩니다"):
+            for k, v in disc["errors"].items():
+                st.caption(f"`{k}`: {v}")
 
-        with st.expander(f"{meta['label']}  (`{target}`){badge}",
-                         expanded=bool(cur.get("enabled"))):
-            st.caption(meta["desc"])
-            enabled = st.toggle("사용", value=bool(cur.get("enabled")),
-                                key=f"en__{target}")
-            conf: dict = {"enabled": enabled}
+    st.divider()
 
-            # PG/MySQL: RDS 자동 탐색 결과가 있으면 드롭박스로 선택 → host/port/db_id prefill
-            prefill: dict = {}
-            disc_key = {"community-postgres": "pg", "community-mysql": "mysql"}.get(target)
-            if disc_key and discovered.get(disc_key):
-                options = discovered[disc_key]
-                labels = ["(직접 입력)"] + [o["label"] for o in options]
-                sel = st.selectbox("RDS 인스턴스 선택 (자동 탐색)", labels,
-                                   key=f"disc__{target}")
-                if sel != "(직접 입력)":
-                    chosen = next((o for o in options if o["label"] == sel), None)
-                    if chosen:
-                        host_key = "PG_HOST" if disc_key == "pg" else "MYSQL_HOST"
-                        port_key = "PG_PORT" if disc_key == "pg" else "MYSQL_PORT"
-                        prefill = {host_key: chosen["host"], port_key: chosen["port"]}
-                        st.caption(f"→ host `{chosen['host']}` · db_id `{chosen['db_id']}` 자동 입력됨. "
-                                   "user/password 또는 Secret 만 채우세요.")
-
-            # Secret 드롭박스 (PG/MySQL)
-            secret_field = {"community-postgres": "PG_SECRET_ARN",
-                            "community-mysql": "MYSQL_SECRET_ARN"}.get(target)
-            if secret_field and secrets_list:
-                cur_secret = cur.get(secret_field, "")
-                sopts = ["(직접 입력/미사용)"] + secrets_list
-                idx = sopts.index(cur_secret) if cur_secret in sopts else 0
-                ssel = st.selectbox("Secrets Manager 자격증명 선택", sopts, index=idx,
-                                    key=f"secsel__{target}")
-                if ssel != "(직접 입력/미사용)":
-                    prefill[secret_field] = ssel
-
-            for fkey, flabel, ftype in meta["fields"]:
-                val = prefill.get(fkey, cur.get(fkey, ""))
-                # prefill 된 필드는 key 에 값 해시를 섞어 위젯을 새로 그린다
-                # (selectbox 선택을 text_input 기본값에 즉시 반영하기 위함).
-                wkey = f"f__{target}__{fkey}"
-                if fkey in prefill:
-                    wkey += f"__{hash(str(val)) & 0xffff}"
-                if ftype == "password":
-                    conf[fkey] = st.text_input(flabel, value=val, type="password", key=wkey)
-                elif ftype == "number":
-                    conf[fkey] = st.text_input(flabel, value=str(val) if val else "", key=wkey)
-                else:
-                    conf[fkey] = st.text_input(flabel, value=val, key=wkey)
-            # 빈 문자열 필드는 굳이 저장하지 않음 (Secret/직접입력 혼동 방지)
-            conf = {k: v for k, v in conf.items() if k == "enabled" or v}
-            new_tools[target] = conf
-
-            if st.button("🔌 연결 테스트", key=f"test__{target}", disabled=not enabled):
-                # 테스트 전에 현재 편집값을 먼저 저장해야 라우터가 그 설정으로 연결
-                cfg["tools"] = {**cfg["tools"], **new_tools}
-                _save(cfg)
-                res = _health(target)
-                st.session_state["_mcp_health"] = {**health, **(res if isinstance(res, dict) else {})}
-                one = res.get(target, {}) if isinstance(res, dict) else {}
-                if one.get("ok"):
-                    st.success(f"연결 성공 — {one.get('tools', 0)} tools")
-                else:
-                    st.error(f"연결 실패: {one.get('error', res.get('_error', 'unknown'))}")
-
-    # ─── infra_context ───
+    # ── 전역 설정 ──
     with st.container(border=True):
-        st.markdown("#### 인프라 식별자 (분석 프롬프트가 참조)")
-        st.caption("비워두면 에이전트가 describe 도구로 직접 찾습니다.")
+        st.markdown("##### ⚙️ 전역 설정")
+        g1, g2 = st.columns(2)
+        regions = _REGIONS if cfg["aws_region"] in _REGIONS else [cfg["aws_region"], *_REGIONS]
+        cfg["aws_region"] = g1.selectbox("AWS Region", regions,
+                                         index=regions.index(cfg["aws_region"]))
+        models = st.session_state["_bedrock_models"]
+        if cfg["bedrock_model_id"] not in models:
+            models = [cfg["bedrock_model_id"], *models]
+        cfg["bedrock_model_id"] = g2.selectbox("Bedrock Model", models,
+                                               index=models.index(cfg["bedrock_model_id"]),
+                                               help="bedrock:InvokeModel 권한 필요")
+
+    # ── 도구 상세 (카테고리별) ──
+    new_tools: dict[str, dict] = {}
+    for cat_label, targets in _CATEGORIES:
+        st.markdown(f"#### {cat_label}")
+        for target in targets:
+            new_tools[target] = _render_tool_card(target, cfg, disc, secrets, health)
+
+    # ── 인프라 식별자 (드롭박스화) ──
+    st.markdown("#### 🏷️ 인프라 식별자")
+    with st.container(border=True):
+        st.caption("분석 프롬프트가 참조하는 식별자. 비워두면 에이전트가 describe 로 직접 찾습니다.")
         ic = cfg["infra_context"]
-        cols = st.columns(2)
+        src_map = {
+            "clusters": disc.get("clusters", []),
+            "instances": disc.get("instances", []),
+            "ec2_ids": [o["id"] for o in disc.get("ec2", []) if o.get("id")],
+            "msk": disc.get("msk", []),
+            "s3_buckets": disc.get("s3_buckets", []),
+        }
         new_ic: dict = {}
-        for i, (key, label) in enumerate(_INFRA_FIELDS):
-            new_ic[key] = cols[i % 2].text_input(label, value=ic.get(key, ""),
-                                                  key=f"ic__{key}")
+        cols = st.columns(2)
+        for i, (key, label, source) in enumerate(_INFRA_FIELDS):
+            with cols[i % 2]:
+                new_ic[key] = _select_or_text(label, src_map.get(source, []),
+                                              ic.get(key, ""), key=f"ic__{key}")
         new_ic = {k: v for k, v in new_ic.items() if v}
 
-    # ─── 저장 ───
-    if st.button("💾 전체 저장", type="primary", use_container_width=True):
+    # ── 하단 저장 ──
+    st.divider()
+    s1, s2 = st.columns([3, 1])
+    if s1.button("💾 전체 저장 후 적용", type="primary", use_container_width=True):
         cfg["tools"] = new_tools
         cfg["infra_context"] = new_ic
         _save(cfg)
-        st.success("저장 완료 — 라우터가 다음 호출부터 반영합니다.")
+        st.session_state["_mcp_health"] = _health()
+        st.success("저장 완료 — 라우터가 즉시 반영합니다.")
+        st.rerun()
+    if s2.button("🔌 전체 연결 테스트", use_container_width=True):
+        cfg["tools"] = new_tools
+        _save(cfg)
         st.session_state["_mcp_health"] = _health()
         st.rerun()
