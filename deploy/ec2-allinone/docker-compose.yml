@@ -1,0 +1,92 @@
+# DBAOps-Agent 올인원 EC2 — AgentCore/Gateway/Cognito/Lambda 없이 단일 박스 구동.
+#
+#   streamlit ─┐
+#              ├─ HTTP/NDJSON ─> agent ─ MCP JSON-RPC ─> mcp-router ─> (DB/Prometheus/AWS)
+#   slack-bot ─┘
+#
+# 사전: 이 디렉토리에 .env 작성(.env.example 참고), connections.json 준비(연결설정 UI 가 write).
+# 실행: docker compose up -d --build
+#
+# 자격증명: EC2 instance role 을 컨테이너가 자동 사용(IMDS). 로컬 테스트 시 ~/.aws 마운트.
+
+x-aws-env: &aws-env
+  AWS_REGION: ${AWS_REGION:-ap-northeast-2}
+  BEDROCK_REGION: ${AWS_REGION:-ap-northeast-2}
+
+services:
+  mcp-router:
+    build:
+      context: ../..
+      dockerfile: mcp_router/Dockerfile
+    environment:
+      <<: *aws-env
+      MCP_ROUTER_PORT: "9000"
+      DBAOPS_DATA_DIR: /data
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - dbaops-data:/data
+      - ${AWS_SHARED_DIR:-/dev/null}:/root/.aws:ro
+    expose:
+      - "9000"
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ../../agent
+      dockerfile: Dockerfile
+    # agent Dockerfile 은 ARM64 고정 — x86 호스트 테스트 시 아래 platform 주석 해제
+    # platform: linux/arm64
+    environment:
+      <<: *aws-env
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-global.anthropic.claude-opus-4-7}
+      GATEWAY_ENDPOINT: http://mcp-router:9000/mcp
+      DBAOPS_DATA_DIR: /data
+      PORT: "8080"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - dbaops-data:/data
+      - ${AWS_SHARED_DIR:-/dev/null}:/root/.aws:ro
+    expose:
+      - "8080"
+    depends_on:
+      - mcp-router
+    restart: unless-stopped
+
+  streamlit:
+    build:
+      context: ../../ui/streamlit
+      dockerfile: Dockerfile
+    environment:
+      <<: *aws-env
+      AGENT_HTTP_URL: http://agent:8080/invocations
+      MCP_ROUTER_HEALTH_URL: http://mcp-router:9000/healthz
+      DBAOPS_DATA_DIR: /data
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-global.anthropic.claude-opus-4-7}
+      SHOW_GENERATORS: "false"
+    volumes:
+      - dbaops-data:/data
+    ports:
+      - "${STREAMLIT_PORT:-8501}:8501"
+    depends_on:
+      - agent
+      - mcp-router
+    restart: unless-stopped
+
+  slack-bot:
+    build:
+      context: ../..
+      dockerfile: slack_bot/Dockerfile
+    environment:
+      <<: *aws-env
+      AGENT_HTTP_URL: http://agent:8080/invocations
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN}
+      SLACK_APP_TOKEN: ${SLACK_APP_TOKEN}
+      STREAMLIT_URL: ${STREAMLIT_URL:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      - agent
+    restart: unless-stopped
+    # Slack 토큰 없으면 봇만 비활성화하려면: profiles: ["slack"] 후 --profile slack 으로 기동
+
+volumes:
+  dbaops-data:

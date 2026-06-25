@@ -9,11 +9,15 @@ from datetime import datetime, timedelta, timezone
 import streamlit as st
 
 from agentcore_client import invoke_stream as agentcore_invoke_stream
-from components import view_generators, view_swarm
+from components import view_connections, view_generators, view_swarm
+
+# 올인원 EC2: agent HTTP 직접 호출 모드 / generator 탭 노출 여부
+AGENT_HTTP_URL = os.environ.get("AGENT_HTTP_URL", "")
+SHOW_GENERATORS = os.environ.get("SHOW_GENERATORS", "false").lower() in ("1", "true", "yes")
 
 st.set_page_config(page_title="DBAOps-Agent", layout="wide")
 st.title("DBAOps-Agent")
-st.caption("LangGraph + AgentCore — 3 Supervisor (OS·인프라 / DB 성능 / 로그) + 시나리오 라이브 모니터")
+st.caption("LangGraph + MCP — 3 도메인 에이전트 (OS·인프라 / DB 성능 / 로그) + 단일 RCA 에이전트")
 
 # ───────────────────────── 세션 상태 ─────────────────────────
 SUPERVISORS: list[dict] = [
@@ -108,7 +112,10 @@ with st.sidebar:
         st.rerun()
 
     runtime_arn = os.environ.get("AGENTCORE_RUNTIME_ARN", "")
-    st.caption(f"runtime: `{runtime_arn.rsplit('/',1)[-1] or '(unset)'}`")
+    if AGENT_HTTP_URL:
+        st.caption(f"backend: `agent HTTP` → {AGENT_HTTP_URL}")
+    else:
+        st.caption(f"runtime: `{runtime_arn.rsplit('/',1)[-1] or '(unset)'}`")
     for s in SUPERVISORS:
         st.caption(f"{s['tab']} session: `{st.session_state[f'session_id__{s['key']}']}`")
     st.caption("🧪 시나리오 트리거는 **시나리오 라이브 모니터** 탭으로 이동했습니다.")
@@ -145,7 +152,9 @@ def _summarize_turn(turn: dict) -> str:
 
 
 # ───────────────────────── 메인 탭 ─────────────────────────
-chat_tab_labels = [s["tab"] for s in SUPERVISORS] + ["🧪 시나리오 라이브 모니터"]
+chat_tab_labels = [s["tab"] for s in SUPERVISORS] + ["🔌 MCP 연결설정"]
+if SHOW_GENERATORS:
+    chat_tab_labels.append("🧪 시나리오 라이브 모니터")
 chat_tabs = st.tabs(chat_tab_labels)
 
 
@@ -198,8 +207,8 @@ def _render_supervisor_tab(s: dict) -> None:
     if not prompt:
         return
 
-    if not runtime_arn:
-        st.warning("AGENTCORE_RUNTIME_ARN 이 비어있어 호출할 수 없습니다.")
+    if not runtime_arn and not AGENT_HTTP_URL:
+        st.warning("AGENT_HTTP_URL 또는 AGENTCORE_RUNTIME_ARN 이 설정되지 않아 호출할 수 없습니다.")
         st.stop()
 
     st.session_state.pop(f"chat_prefill_pending__{sup_key}", None)
@@ -252,10 +261,16 @@ def _render_supervisor_tab(s: dict) -> None:
     st.rerun()
 
 
-for tab, s in zip(chat_tabs[:-1], SUPERVISORS):
+# 처음 N개 = supervisor 탭
+for tab, s in zip(chat_tabs[:len(SUPERVISORS)], SUPERVISORS):
     with tab:
         _render_supervisor_tab(s)
 
+# 그 다음 = MCP 연결설정
+with chat_tabs[len(SUPERVISORS)]:
+    view_connections.render()
 
-with chat_tabs[-1]:
-    view_generators.render(autorefresh_sec=int(os.environ.get("GEN_REFRESH_SEC", "5")))
+# (옵션) 마지막 = 시나리오 라이브 모니터 (testbed PoC 전용)
+if SHOW_GENERATORS:
+    with chat_tabs[-1]:
+        view_generators.render(autorefresh_sec=int(os.environ.get("GEN_REFRESH_SEC", "5")))

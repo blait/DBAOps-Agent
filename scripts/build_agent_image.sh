@@ -14,5 +14,7 @@ aws ecr describe-repositories --repository-names "${REPO}" --region "${REGION}" 
 aws ecr get-login-password --region "${REGION}" | docker login --username AWS --password-stdin "${ECR}"
 
 cd "$(dirname "$0")/../agent"
-docker buildx build --platform linux/arm64 -t "${ECR}/${REPO}:${TAG}" --push .
+# AgentCore Runtime 은 ARM64 강제 → base image 도 arm64 로 고정.
+docker buildx build --platform linux/arm64 --build-arg BASE_PLATFORM=linux/arm64 \
+  -t "${ECR}/${REPO}:${TAG}" --push .
 echo "pushed ${ECR}/${REPO}:${TAG}"

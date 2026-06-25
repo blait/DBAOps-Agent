@@ -726,14 +726,41 @@ DOCS_TOOLS = [
 ]
 
 
+def _connections_infra_context() -> dict[str, str]:
+    """올인원 EC2: connections.json 의 infra_context 섹션 (UI 연결설정 페이지가 write).
+
+    env 가 비어있을 때의 fallback 소스. 파일이 없거나 키가 없으면 빈 dict.
+    """
+    path = os.environ.get(
+        "DBAOPS_CONNECTIONS_PATH",
+        os.path.join(os.environ.get("DBAOPS_DATA_DIR", "/data"), "connections.json"),
+    )
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        ctx = data.get("infra_context")
+        return ctx if isinstance(ctx, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 def infra_context() -> dict[str, str]:
-    """Runtime env 에서 인프라 식별자(prom instance id, aurora writer id 등) 추출."""
+    """인프라 식별자(prom instance id, aurora writer id 등).
+
+    우선순위: 환경변수 INFRA_* > connections.json infra_context > 빈 문자열.
+    (PoC 의 dbaops-poc-* 하드코딩 default 는 제거 — 고객 환경에선 무의미.)
+    """
+    conn = _connections_infra_context()
+
+    def pick(env_key: str, conn_key: str) -> str:
+        return os.environ.get(env_key) or conn.get(conn_key) or ""
+
     return {
-        "prom_instance_id":  os.environ.get("INFRA_PROM_INSTANCE_ID", ""),
-        "aurora_cluster_id": os.environ.get("INFRA_AURORA_CLUSTER_ID", "dbaops-poc-aurora-pg"),
-        "aurora_writer_id":  os.environ.get("INFRA_AURORA_WRITER_ID", "dbaops-poc-aurora-pg-writer"),
-        "aurora_reader_id":  os.environ.get("INFRA_AURORA_READER_ID", "dbaops-poc-aurora-pg-reader"),
-        "mysql_db_id":       os.environ.get("INFRA_MYSQL_DB_ID", "dbaops-poc-mysql"),
-        "msk_cluster_name":  os.environ.get("INFRA_MSK_CLUSTER_NAME", "dbaops-poc"),
-        "log_bucket":        os.environ.get("INFRA_LOG_BUCKET", ""),
+        "prom_instance_id":  pick("INFRA_PROM_INSTANCE_ID", "prom_instance_id"),
+        "aurora_cluster_id": pick("INFRA_AURORA_CLUSTER_ID", "aurora_cluster_id"),
+        "aurora_writer_id":  pick("INFRA_AURORA_WRITER_ID", "aurora_writer_id"),
+        "aurora_reader_id":  pick("INFRA_AURORA_READER_ID", "aurora_reader_id"),
+        "mysql_db_id":       pick("INFRA_MYSQL_DB_ID", "mysql_db_id"),
+        "msk_cluster_name":  pick("INFRA_MSK_CLUSTER_NAME", "msk_cluster_name"),
+        "log_bucket":        pick("INFRA_LOG_BUCKET", "log_bucket"),
     }
