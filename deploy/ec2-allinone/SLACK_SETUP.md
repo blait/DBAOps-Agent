@@ -27,16 +27,22 @@ oauth_config:
     bot:
       - app_mentions:read   # 멘션 수신
       - chat:write          # 메시지 전송
-      - files:write         # (후속) 차트 PNG 첨부용
+      - files:write         # 차트 PNG 첨부
+      - channels:history    # 스레드 내 후속 질문 수신(공개 채널)
+      - groups:history      # 〃 (비공개 채널)
 settings:
   event_subscriptions:
     bot_events:
       - app_mention         # @DBAOps 멘션 시 호출
+      - message.channels    # 스레드 내 멘션 없는 후속 질문(공개 채널)
+      - message.groups      # 〃 (비공개 채널)
   interactivity:
     is_enabled: true        # 도메인 선택 버튼
   socket_mode_enabled: true # 공개 엔드포인트 불필요
   org_deploy_enabled: false
 ```
+
+> DM 으로도 대화하려면 scope `im:history`, 이벤트 `message.im` 을 추가한다.
 
 > 회사 워크스페이스가 **앱 승인제**라면 관리자 승인이 필요할 수 있다(Enterprise Grid 등).
 > 그 경우 "Request to Install" 후 워크스페이스 관리자 승인을 받는다.
@@ -55,6 +61,27 @@ settings:
 2. 설치 후 나오는 **Bot User OAuth Token** `xoxb-...` 복사 → 이게 `SLACK_BOT_TOKEN`
 
 > 매니페스트로 만들었으면 scope/이벤트는 이미 설정돼 있다. 토큰 2개만 받으면 된다.
+
+---
+
+## 2-3. (이미 만든 앱이면) 후속 질문용 이벤트 추가
+
+처음부터 위 매니페스트로 만들었으면 건너뛴다. **`app_mention` 만 있는 기존 앱**에
+스레드 후속 질문(멘션 없이 이어 말하기)을 켜려면 이벤트 2개를 추가한다.
+
+1. 좌측 **Event Subscriptions** → **Subscribe to bot events** 펼치기
+2. **Add Bot User Event** (또는 "Find and add an event" 검색창)에서 추가:
+   - `message.channels` (공개 채널)
+   - `message.groups` (비공개 채널이면)
+   - `message.im` (DM 으로도 쓰면)
+   - → `channels:history` / `groups:history` / `im:history` 스코프가 **자동으로 붙는다**
+3. 하단 **Save Changes**
+4. 상단에 뜨는 노란 배너 **reinstall your app** → **Reinstall to Workspace** → 승인
+   - 토큰은 그대로 유지된다. `.env` 안 바꿔도 됨.
+
+> `message.*` 를 구독하면 봇이 채널의 모든 메시지를 받지만, 봇은 (a) 스레드 밖,
+> (b) 멘션 포함(=`app_mention` 이 처리), (c) 봇 자신의 메시지를 모두 무시한다.
+> 실제로 반응하는 건 **"이미 분석을 시작한 스레드 안의 일반 메시지"** 뿐이다.
 
 ---
 
@@ -95,7 +122,26 @@ docker compose logs -f slack-bot
 흐름:
 1. 봇이 **도메인 선택 버튼** 제시 (🖥️ OS·인프라 / 🗄️ DB 성능 / 📜 로그 / 🧠 단일 RCA)
 2. 버튼 클릭 → 스레드에 진행상황 실시간 갱신 ("🔧 도구 호출…" → "✅ 검증 통과")
-3. 최종 리포트(markdown) 게시. 차트가 있으면 개수 + Streamlit 링크 안내
+3. 최종 리포트(markdown) 게시. 차트가 있으면 PNG 로 첨부
+
+### 4-1. 스레드에서 이어 묻기 (대화 연속성)
+
+**같은 스레드 = 같은 세션.** 한 번 모드를 고른 스레드에서는 멘션 없이 그냥 이어 말하면
+**직전과 같은 모드로** 실행되고, 에이전트가 **이전 대화 맥락을 기억**한다.
+
+```
+@DBAOps 최근 1시간 RDS CPU 분석      ← 멘션 → 모드 버튼
+  [🖥️ OS·인프라] 클릭                ← 분석 실행
+  ↳ 그럼 메모리는?                    ← 멘션 없이 입력 → 같은 모드로 이어서 분석
+  ↳ top 5만 다시 보여줘               ← 직전 결과를 기억한 채 이어감
+```
+
+- 세션 키 = Slack 스레드 타임스탬프(`thread_ts`). 새 멘션(새 스레드)은 새 대화.
+- 모드를 아직 안 고른 스레드에서 그냥 말하면 봇이 먼저 모드 버튼을 띄운다.
+- 맥락은 agent 컨테이너 메모리(InMemorySaver)에 보관 — **agent 재시작 시 초기화**된다.
+
+> 2-3 의 `message.*` 이벤트가 켜져 있어야 후속 질문이 동작한다. 안 켜져 있으면
+> 스레드에서 멘션 없이 말해도 봇이 반응하지 않는다(멘션은 계속 정상 동작).
 
 ---
 
@@ -120,6 +166,8 @@ Slack ──outbound wss(Socket Mode)── [slack-bot 컨테이너]
 |---|---|
 | 봇이 오프라인 | `docker compose logs slack-bot` — 토큰 오타/만료, App Token scope `connections:write` |
 | 멘션 무반응 | Event Subscriptions 에 `app_mention` 구독됐나, 채널에 `/invite` 했나 |
+| 스레드 후속질문 무반응 | 2-3 의 `message.channels`(또는 groups/im) 구독 + 재설치했나, 해당 스레드에서 모드를 한 번 골랐나 |
+| 후속질문이 새 대화처럼 | agent 가 재시작됐나(InMemorySaver 휘발), 같은 스레드에서 묻고 있나 |
 | 버튼 눌러도 무반응 | Interactivity 활성화됐나, agent 컨테이너 Up 인지(`docker compose ps`) |
 | "실행 오류" | agent 로그(`docker compose logs agent`), `bedrock:InvokeModel` 권한, 라우터 상태 |
 | 토큰 갱신 후 | `docker compose up -d slack-bot` 재기동(`.env` 다시 읽음) |

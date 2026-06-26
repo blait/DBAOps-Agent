@@ -1,15 +1,16 @@
 """DBAOps Slack 봇 — Socket Mode.
 
-흐름:
-  1. 워크스페이스에서 @봇 멘션 → 질문 텍스트 파싱
-  2. Block Kit 버튼으로 분석 모드 선택 (OS·인프라 / DB 성능 / 로그 / 단일 RCA)
-  3. 버튼 클릭 → 해당 mode 로 agent 호출 (invoke_stream) → 스레드에 진행/리포트 게시
+대화형 흐름 (Claude Code 스타일):
+  1. @봇 멘션 + 질문 → 곧바로 유연한 단일 에이전트(single)가 응답.
+     모드 선택 버튼 없음 — 에이전트가 질문 성격(잡담/조회/원인분석)을 스스로 판단.
+  2. 같은 스레드 안에서는 멘션 없이 이어 말해도 같은 세션으로 대화가 계속됨
+     (session_id = thread_ts → agent 가 이전 맥락 기억). 되묻기→답변→이어가기 자연스럽게.
 
 Socket Mode 이므로 공개 엔드포인트 불필요 — 봇이 Slack 으로 outbound WebSocket 만 건다.
 프라이빗 EC2 + egress 만으로 동작. agent 는 같은 박스의 AGENT_HTTP_URL 로 호출.
 
 env:
-  SLACK_BOT_TOKEN   xoxb-...   (chat:write, app_mentions:read)
+  SLACK_BOT_TOKEN   xoxb-...   (chat:write, app_mentions:read, channels:history)
   SLACK_APP_TOKEN   xapp-...   (Socket Mode, connections:write)
   AGENT_HTTP_URL    http://agent:8080/invocations
   STREAMLIT_URL     (선택) 차트 전체 보기 링크
@@ -17,12 +18,10 @@ env:
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 import threading
-import uuid
 from datetime import datetime, timedelta, timezone
 
 from slack_bolt import App
@@ -39,13 +38,14 @@ DEFAULT_WINDOW_HOURS = int(os.environ.get("SLACK_DEFAULT_WINDOW_HOURS", "1"))
 
 app = App(token=os.environ["SLACK_BOT_TOKEN"])
 
-# 분석 모드 정의 — value 에 mode/domain 인코딩
-_MODES = [
-    {"label": "🖥️ OS·인프라", "mode": "pipeline", "domain": "os_metric"},
-    {"label": "🗄️ DB 성능",   "mode": "pipeline", "domain": "db_metric"},
-    {"label": "📜 로그",       "mode": "pipeline", "domain": "log"},
-    {"label": "🧠 단일 RCA",   "mode": "single",   "domain": None},
-]
+# 활성 스레드 집합 — 멘션으로 한 번 대화를 시작한 스레드는 멘션 없이 이어 말해도 응답.
+# 봇 재시작 시 초기화(실용상 충분).
+_ACTIVE_THREADS: set[str] = set()
+
+
+def _session_id(thread_ts: str) -> str:
+    """Slack 스레드 타임스탬프 → 안정적인 session_id. 같은 스레드 = 같은 대화."""
+    return "slk-" + thread_ts.replace(".", "")
 
 
 def _strip_mention(text: str) -> str:
@@ -60,47 +60,29 @@ def _window() -> dict:
             "end": now.isoformat(timespec="seconds")}
 
 
-def _mode_buttons(question: str) -> list:
-    """질문을 각 버튼 value 에 실어 도메인 선택 Block 구성."""
-    elements = []
-    for i, m in enumerate(_MODES):
-        payload = json.dumps({"mode": m["mode"], "domain": m["domain"], "q": question})
-        elements.append({
-            "type": "button",
-            "text": {"type": "plain_text", "text": m["label"]},
-            "value": payload[:1900],     # Slack value 한도 2000
-            "action_id": f"dbaops_mode_{i}",
-        })
-    return [
-        {"type": "section",
-         "text": {"type": "mrkdwn", "text": f"*분석 요청:* {question}\n어떤 분석으로 실행할까요?"}},
-        {"type": "actions", "elements": elements},
-    ]
-
-
 @app.event("app_mention")
-def on_mention(event, say):
+def on_mention(event, client):
     question = _strip_mention(event.get("text", ""))
     thread_ts = event.get("thread_ts") or event.get("ts")
+    channel = event["channel"]
     if not question:
-        say(text="질문을 함께 적어주세요. 예: `@DBAOps 최근 1시간 CPU peak 분석`",
-            thread_ts=thread_ts)
+        client.chat_postMessage(
+            channel=channel, thread_ts=thread_ts,
+            text="안녕하세요 — DB·인프라 관련해서 뭐든 물어보세요. "
+                 "예: `@DBAOps 최근 1시간 Aurora CPU 어때?`")
         return
-    say(blocks=_mode_buttons(question), text="분석 모드를 선택하세요.", thread_ts=thread_ts)
+    _start_chat(client, channel, thread_ts, question)
 
 
-def _run_analysis(client, channel: str, thread_ts: str, status_ts: str,
-                  mode: str, domain: str | None, question: str) -> None:
-    """백그라운드 스레드에서 agent 호출 + Slack 업데이트 (Slack 3초 ack 제한 회피)."""
+def _run_chat(client, channel: str, thread_ts: str, status_ts: str,
+              question: str) -> None:
+    """백그라운드 스레드에서 agent(single) 호출 + Slack 업데이트 (3초 ack 제한 회피)."""
     request = {
-        "mode": mode,
+        "mode": "single",
         "free_text": question,
         "time_range": _window(),
-        "session_id": str(uuid.uuid4())[:8],
+        "session_id": _session_id(thread_ts),   # 스레드 = 세션 → agent 가 이전 맥락 기억
     }
-    if mode == "pipeline":
-        request["domain"] = domain
-
     renderer = SlackThreadRenderer(
         client, channel, thread_ts, status_ts, streamlit_url=STREAMLIT_URL or None,
     )
@@ -108,7 +90,7 @@ def _run_analysis(client, channel: str, thread_ts: str, status_ts: str,
         for ev in agentcore_client.invoke_stream(request):
             renderer.handle(ev)
     except Exception as e:  # noqa: BLE001
-        logger.exception("analysis failed")
+        logger.exception("chat failed")
         try:
             client.chat_postMessage(channel=channel, thread_ts=thread_ts,
                                     text=f"❌ 실행 오류: {e!r}")
@@ -116,34 +98,38 @@ def _run_analysis(client, channel: str, thread_ts: str, status_ts: str,
             pass
 
 
-@app.action(re.compile(r"dbaops_mode_\d+"))
-def on_mode_select(ack, body, client):
-    ack()
-    action = body["actions"][0]
-    payload = json.loads(action["value"])
-    mode = payload["mode"]
-    domain = payload.get("domain")
-    question = payload.get("q", "")
-
-    channel = body["channel"]["id"]
-    # 버튼이 달린 메시지의 스레드. container 의 message_ts 가 봇 메시지 ts.
-    thread_ts = body["message"].get("thread_ts") or body["message"]["ts"]
-
-    label = next((m["label"] for m in _MODES
-                  if m["mode"] == mode and m["domain"] == domain), mode)
-
-    # 진행상황 메시지 1개 생성 → 이후 chat_update 로 갱신
+def _start_chat(client, channel: str, thread_ts: str, question: str) -> None:
+    """진행상황 메시지 생성 + 백그라운드 대화 시작. 스레드를 활성으로 표시."""
+    _ACTIVE_THREADS.add(thread_ts)
     status = client.chat_postMessage(
-        channel=channel, thread_ts=thread_ts,
-        text=f"⏳ `{label}` 분석을 준비합니다…",
+        channel=channel, thread_ts=thread_ts, text="⏳ 확인 중…",
     )
-    status_ts = status["ts"]
-
     threading.Thread(
-        target=_run_analysis,
-        args=(client, channel, thread_ts, status_ts, mode, domain, question),
+        target=_run_chat,
+        args=(client, channel, thread_ts, status["ts"], question),
         daemon=True,
     ).start()
+
+
+@app.event("message")
+def on_thread_message(event, client):
+    """활성 스레드 안에서 멘션 없이 이어 말하면 같은 세션으로 대화를 계속한다.
+
+    - 봇/시스템 메시지, 멘션 포함 메시지(app_mention 가 처리), 스레드 밖 메시지는 무시.
+    - 멘션으로 시작한 적 없는 스레드는 무시(아무 채널 잡담에 끼어들지 않음).
+    """
+    if event.get("bot_id") or event.get("subtype"):
+        return
+    thread_ts = event.get("thread_ts")
+    if not thread_ts or thread_ts not in _ACTIVE_THREADS:
+        return
+    text = event.get("text", "")
+    if "<@" in text:                        # 멘션 포함 → app_mention 핸들러가 처리
+        return
+    question = text.strip()
+    if not question:
+        return
+    _start_chat(client, event["channel"], thread_ts, question)
 
 
 def main() -> None:

@@ -344,8 +344,7 @@ class SlackThreadRenderer:
         etype = ev.get("type")
 
         if etype == "start":
-            dom = ev.get("domain") or "single"
-            self._update_status(f"🚀 분석 시작 — `{dom}`")
+            self._update_status("⏳ 확인 중…")
 
         elif etype == "stage":
             stage = ev.get("stage", "")
@@ -370,10 +369,16 @@ class SlackThreadRenderer:
                 tcs = msg.get("tool_calls") or []
                 for _ in tcs:
                     self._tool_calls += 1
+                text = (msg.get("text") or "").strip()
                 if tcs:
-                    names = ", ".join(tc.get("name", "?") for tc in tcs)
-                    self._update_status(f"🔧 도구 호출: `{names}` (누적 {self._tool_calls})")
-                elif (msg.get("text") or "").strip():
+                    # 도구 호출 직전 예고 문장(preamble)이 있으면 그걸 진행상황으로 보여준다
+                    # — Claude Code 식 "뭘 확인할지 한 문장". 없으면 도구명을 표시.
+                    if text:
+                        self._update_status(f"💬 {text[:280]}")
+                    else:
+                        names = ", ".join(tc.get("name", "?") for tc in tcs)
+                        self._update_status(f"🔧 `{names}` 확인 중…")
+                elif text:
                     # tool_call 없는 ai 메시지 = 자연어 답변 → single 모드 최종답변 후보
                     self._last_ai_text = msg["text"]
 
@@ -396,8 +401,11 @@ class SlackThreadRenderer:
             if not self._reported and self._last_ai_text.strip():
                 self._emit_report(self._last_ai_text, [])
                 self._reported = True
-            self._update_status(f"✅ 완료 (메시지 {ev.get('n_messages', '?')} · "
-                                f"tool calls {self._tool_calls})")
+            # 진행상황 메시지를 결과에 어울리게 마무리(도구 안 썼으면 카운트 노출 안 함).
+            if self._tool_calls:
+                self._update_status(f"✅ 완료 · 도구 {self._tool_calls}회 사용")
+            else:
+                self._update_status("✅ 완료")
 
         elif etype == "abort":
             self._post(f"⏹️ 중단: {ev.get('reason', 'unknown')}")
