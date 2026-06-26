@@ -9,6 +9,7 @@ report/done/error)를 받아 Slack 스레드를 실시간 업데이트한다.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 # report markdown 의 ```json-chart ...``` 펜스 제거용
 _CHART_FENCE = re.compile(r"```json-chart\s*\n.*?\n```", re.DOTALL)
@@ -34,26 +35,99 @@ def strip_charts(markdown: str) -> tuple[str, int]:
 # Slack 은 표준 MD 를 렌더하지 않고 mrkdwn 을 쓴다:
 #   **굵게** → *굵게*,  ## 제목 → *제목*,  [a](b) → <b|a>,  표 → 코드블록 정렬.
 
+# 코드블록 안에서 폭 계산을 깨뜨리는 이모지 → 1칸 ASCII 로 치환.
+_CELL_EMOJI = {"✅": "Y", "❌": "N", "⚠️": "!", "🟢": "Y", "🔴": "N", "✔️": "Y", "✖️": "N"}
+_MAX_CELL = 22    # 셀 최대 폭 (넘으면 …로 줄여 표가 화면을 안 넘게)
+_MAX_TABLE_W = 72  # 표 전체 폭 상한 — 넘으면 레코드 리스트로 폴백(모바일/좁은 화면 대비)
+
+
+def _dw(s: str) -> int:
+    """문자열의 monospace 표시폭 (CJK/이모지 wide=2, 그 외 1)."""
+    w = 0
+    for ch in s:
+        w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return w
+
+
+def _pad(s: str, width: int) -> str:
+    """표시폭 기준 좌측 정렬 패딩."""
+    return s + " " * max(0, width - _dw(s))
+
+
+def _truncate_dw(s: str, max_w: int) -> str:
+    """표시폭 기준 truncate (… 포함)."""
+    if _dw(s) <= max_w:
+        return s
+    out, w = "", 0
+    for ch in s:
+        cw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if w + cw > max_w - 1:
+            break
+        out += ch
+        w += cw
+    return out + "…"
+
+
+def _clean_cell(s: str) -> str:
+    """셀 정제 — mrkdwn 잔재 제거 + 이모지 치환 (truncate 는 표 렌더 시점에)."""
+    for e, a in _CELL_EMOJI.items():
+        s = s.replace(e, a)
+    s = s.replace("`", "").replace("**", "").strip()
+    s = s.replace("️", "")  # VS16 등 변형 셀렉터 잔흔 제거
+    return s
+
+
 def _md_table_to_code(block: str) -> str:
-    """| a | b | 형태의 MD 표를 monospace 코드블록으로 정렬 변환 (Slack 은 표 미지원)."""
+    """| a | b | 형태의 MD 표를 monospace 코드블록으로 정렬 변환 (Slack 은 표 미지원).
+
+    - 이모지는 폭 계산을 깨므로 Y/N/! 로 치환
+    - 넓거나 컬럼 많은 표는 레코드 리스트로 폴백(정보 보존, 화면 안 넘침)
+    - 코드블록 표는 셀 폭 상한(_MAX_CELL)으로 truncate
+    """
     lines = [ln for ln in block.splitlines() if ln.strip()]
     rows = []
     for ln in lines:
         if re.match(r"^\s*\|?\s*[:\- ]+\|[:\-| ]*$", ln):  # 구분선(---|---) 건너뜀
             continue
-        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        cells = [_clean_cell(c) for c in ln.strip().strip("|").split("|")]
         rows.append(cells)
     if not rows:
         return block
     ncol = max(len(r) for r in rows)
     rows = [r + [""] * (ncol - len(r)) for r in rows]
-    widths = [max(len(r[i]) for r in rows) for i in range(ncol)]
+
+    # 폴백 판정은 truncate 전 원본 폭으로 (정보가 잘리는 표보다 레코드가 낫다)
+    raw_widths = [max(_dw(r[i]) for r in rows) for i in range(ncol)]
+    raw_total = sum(raw_widths) + 2 * (ncol - 1)
+    if (raw_total > _MAX_TABLE_W or ncol >= 5) and len(rows) > 1:
+        return _rows_to_records(rows)
+
+    # 코드블록 표: 셀 truncate 후 폭 재계산
+    trows = [[_truncate_dw(c, _MAX_CELL) for c in r] for r in rows]
+    widths = [max(_dw(r[i]) for r in trows) for i in range(ncol)]
     out = []
-    for ri, r in enumerate(rows):
-        out.append("  ".join(c.ljust(widths[i]) for i, c in enumerate(r)).rstrip())
+    for ri, r in enumerate(trows):
+        out.append("  ".join(_pad(c, widths[i]) for i, c in enumerate(r)).rstrip())
         if ri == 0:  # 헤더 밑줄
             out.append("  ".join("-" * widths[i] for i in range(ncol)))
     return "```\n" + "\n".join(out) + "\n```"
+
+
+def _rows_to_records(rows: list[list[str]]) -> str:
+    """넓은 표 → 행별 레코드 블록. 첫 컬럼을 제목, 나머지는 'key: val' 로.
+
+    예) • database-1
+          버전: 14.22 · 클래스: db.m5.xlarge · PI: N
+    """
+    header = rows[0]
+    out = []
+    for r in rows[1:]:
+        title = r[0] if r else ""
+        pairs = [f"{header[i]}: {r[i]}" for i in range(1, len(header)) if i < len(r) and r[i]]
+        out.append(f"• *{title}*")
+        if pairs:
+            out.append("    " + " · ".join(pairs))
+    return "\n".join(out)
 
 
 def _convert_tables(text: str) -> str:
