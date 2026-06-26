@@ -380,6 +380,12 @@ Gateway 가 자동 끼워넣는 검색 도구 1 개 (`x_amz_bedrock_agentcore_se
 | AWS API 응답 정제 (RDS/EC2/MSK 메타) | `mcp_tools/aws_api/handler.py` |
 | S3 listing-first + gz 디코딩 | `mcp_tools/s3_log_fetch/handler.py` |
 
+### 4-6. 각 도구가 붙을 대상(연결정보)은 어디서 오나
+
+PoC 는 terraform 이 testbed 자기참조로 자동 주입, 고객 환경(올인원 EC2)은 연결설정 UI 가
+instance role 로 탐색해 드롭박스 제공 + DB 자격증명만 사람이 입력 — 상세는
+[`CONNECTION_INFO.md`](CONNECTION_INFO.md).
+
 ---
 
 ## 5. AgentCore 구성

@@ -112,6 +112,9 @@ docker compose logs -f agent
 
 저장하면 라우터가 자동 반영(다음 호출부터). 재시작 불필요.
 
+> 연결정보가 어디서 자동으로 오고 무엇만 사람이 입력해야 하는지(특히 DB 비밀번호),
+> 권한이 없을 때의 fallback 은 [`../../docs/CONNECTION_INFO.md`](../../docs/CONNECTION_INFO.md) 참조.
+
 ---
 
 ## 5. 사용
