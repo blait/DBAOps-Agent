@@ -103,12 +103,21 @@ def _extract_timeseries_from_obj(obj: Any) -> dict[str, list[tuple[Any, Any]]]:
     mdr = obj.get("metricDataResults") or obj.get("metric_data_results")
     if isinstance(mdr, list) and mdr and isinstance(mdr[0], dict):
         for m in mdr:
+            label = m.get("label") or m.get("Label") or m.get("id") or m.get("Id") or "metric"
+            # awslabs cloudwatch-mcp 형식: datapoints=[{timestamp,value}]
+            dps = m.get("datapoints") or m.get("Datapoints")
+            if isinstance(dps, list) and dps:
+                pts = [(d.get("timestamp") or d.get("Timestamp"),
+                        d.get("value") if d.get("value") is not None else d.get("Value"))
+                       for d in dps if isinstance(d, dict)]
+                if pts:
+                    out[str(label)] = pts
+                continue
+            # boto3 GetMetricData 형식: timestamps[]/values[]
             ts_list = m.get("timestamps") or m.get("Timestamps") or []
             val_list = m.get("values") or m.get("Values") or []
-            if not ts_list:
-                continue
-            label = m.get("label") or m.get("Label") or m.get("id") or m.get("Id") or "metric"
-            out[str(label)] = list(zip(ts_list, val_list))
+            if ts_list:
+                out[str(label)] = list(zip(ts_list, val_list))
         if out:
             return out
 

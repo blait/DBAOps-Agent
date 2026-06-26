@@ -176,12 +176,21 @@ def _extract_timeseries_from_obj(obj: Any) -> dict[str, list[tuple[Any, Any]]]:
     mdr = obj.get("metricDataResults") or obj.get("metric_data_results")
     if isinstance(mdr, list) and mdr and isinstance(mdr[0], dict):
         for m in mdr:
+            label = m.get("label") or m.get("Label") or m.get("id") or m.get("Id") or "metric"
+            # awslabs cloudwatch-mcp 형식: datapoints=[{timestamp,value}]
+            dps = m.get("datapoints") or m.get("Datapoints")
+            if isinstance(dps, list) and dps:
+                pts = [(d.get("timestamp") or d.get("Timestamp"),
+                        d.get("value") if d.get("value") is not None else d.get("Value"))
+                       for d in dps if isinstance(d, dict)]
+                if pts:
+                    out[str(label)] = pts
+                continue
+            # boto3 GetMetricData 형식: timestamps[]/values[]
             ts_list = m.get("timestamps") or m.get("Timestamps") or []
             val_list = m.get("values") or m.get("Values") or []
-            if not ts_list:
-                continue
-            label = m.get("label") or m.get("Label") or m.get("id") or m.get("Id") or "metric"
-            out[str(label)] = list(zip(ts_list, val_list))
+            if ts_list:
+                out[str(label)] = list(zip(ts_list, val_list))
         if out:
             return out
 
@@ -311,14 +320,21 @@ def _render_result_payload(target, obj: Any) -> bool:
     # 3-a) awslabs cloudwatch get_metric_data — {metricDataResults: [{id, label, timestamps, values}]}
     mdr = obj.get("metricDataResults") or obj.get("metric_data_results")
     if isinstance(mdr, list) and mdr and isinstance(mdr[0], dict) and \
-       ("timestamps" in mdr[0] or "Timestamps" in mdr[0]):
+       ("timestamps" in mdr[0] or "Timestamps" in mdr[0] or "datapoints" in mdr[0] or "Datapoints" in mdr[0]):
         for m in mdr:
             label = m.get("label") or m.get("Label") or m.get("id") or m.get("Id") or "metric"
-            ts_list = m.get("timestamps") or m.get("Timestamps") or []
-            val_list = m.get("values") or m.get("Values") or []
-            target.markdown(f"**{label}** · {len(ts_list)} pts")
+            dps = m.get("datapoints") or m.get("Datapoints")
+            if isinstance(dps, list) and dps:
+                pairs = [(d.get("timestamp") or d.get("Timestamp"),
+                          d.get("value") if d.get("value") is not None else d.get("Value"))
+                         for d in dps if isinstance(d, dict)]
+            else:
+                ts_list = m.get("timestamps") or m.get("Timestamps") or []
+                val_list = m.get("values") or m.get("Values") or []
+                pairs = list(zip(ts_list, val_list))
+            target.markdown(f"**{label}** · {len(pairs)} pts")
             target.dataframe(
-                [{"ts": _scalar(t, 30), "value": _scalar(v)} for t, v in zip(ts_list, val_list)][:300],
+                [{"ts": _scalar(t, 30), "value": _scalar(v)} for t, v in pairs][:300],
                 use_container_width=True,
                 hide_index=True,
             )
