@@ -127,13 +127,13 @@ docker compose logs -f agent
 ## 6. Slack 앱 설정 (Socket Mode)
 
 공개 엔드포인트가 필요 없다(봇이 Slack 으로 outbound WebSocket 연결).
+앱 매니페스트로 한 번에 설정하는 **상세 단계별 가이드는 [`SLACK_SETUP.md`](SLACK_SETUP.md)** 참조.
 
-1. https://api.slack.com/apps → **Create New App** → From scratch
-2. **Socket Mode** → 활성화 → App-Level Token 생성(scope `connections:write`) → `xapp-...` = `SLACK_APP_TOKEN`
-3. **OAuth & Permissions** → Bot Token Scopes: `app_mentions:read`, `chat:write` → 워크스페이스 설치 → `xoxb-...` = `SLACK_BOT_TOKEN`
-4. **Event Subscriptions** → Enable → Subscribe to bot events: `app_mention`
-5. `.env` 에 두 토큰 입력 → `docker compose up -d slack-bot`
-6. 대상 채널에서 `/invite @DBAOps`
+요약:
+1. api.slack.com/apps → From a manifest (SLACK_SETUP.md 의 YAML)
+2. App Token(`xapp-...`) + Bot Token(`xoxb-...`) 발급
+3. `.env` 에 두 토큰 입력 → `docker compose up -d --build slack-bot`
+4. 대상 채널에서 `/invite @DBAOps` → `@DBAOps 질문` → 도메인 버튼 선택
 
 ---
 
