@@ -266,6 +266,18 @@ class SlackThreadRenderer:
         for p in parts:
             self._post(p)
 
+    def _emit_report(self, markdown: str, charts_meta: list[dict]) -> None:
+        """텍스트(차트블록 제거) 게시 + 차트 PNG 첨부 + 미렌더 차트 안내. report/single 공용."""
+        cleaned, n_charts = strip_charts(markdown)
+        self._post_report(cleaned)
+        uploaded = self._upload_charts(markdown, charts_meta)
+        if n_charts > uploaded:
+            miss = n_charts - uploaded
+            if self.streamlit_url:
+                self._post(f"📊 차트 {miss}개는 데이터 매칭 실패 — 전체는 {self.streamlit_url}")
+            else:
+                self._post(f"📊 차트 {miss}개는 Streamlit UI 에서 확인하세요.")
+
     def _upload_charts(self, markdown: str, charts_meta: list[dict]) -> int:
         """report 의 차트 스펙 → PNG 렌더 → 스레드에 첨부. 첨부한 개수 반환.
 
@@ -351,25 +363,14 @@ class SlackThreadRenderer:
                 self._update_status(f"⚠️ 검증 이슈: {kinds} — 보정 중")
 
         elif etype == "report":
-            markdown = ev.get("markdown", "")
-            cleaned, n_charts = strip_charts(markdown)
-            # 1) 텍스트 리포트 먼저 게시
-            self._post_report(cleaned)
-            # 2) 차트 PNG 렌더 후 첨부
-            uploaded = self._upload_charts(markdown, ev.get("charts") or [])
-            # 3) 렌더 못 한 차트가 있으면 Streamlit 안내
-            if n_charts > uploaded:
-                miss = n_charts - uploaded
-                if self.streamlit_url:
-                    self._post(f"📊 차트 {miss}개는 데이터 매칭 실패 — 전체는 {self.streamlit_url}")
-                else:
-                    self._post(f"📊 차트 {miss}개는 Streamlit UI 에서 확인하세요.")
+            self._emit_report(ev.get("markdown", ""), ev.get("charts") or [])
             self._reported = True
 
         elif etype == "done":
             # single 모드는 report 이벤트가 없으므로 마지막 ai 본문을 최종 답변으로 게시.
+            # single 답변에도 json-chart 블록이 포함될 수 있어 동일하게 차트 처리.
             if not self._reported and self._last_ai_text.strip():
-                self._post_report(self._last_ai_text)
+                self._emit_report(self._last_ai_text, [])
                 self._reported = True
             self._update_status(f"✅ 완료 (메시지 {ev.get('n_messages', '?')} · "
                                 f"tool calls {self._tool_calls})")

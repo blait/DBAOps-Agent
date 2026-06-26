@@ -351,20 +351,53 @@ _RENDERERS = {
 }
 
 
+def _spec_fits(spec: dict, chart_type: str, obj: Any) -> bool:
+    """이 obj 가 spec 의 chart_type 으로 그릴 데이터를 갖고 있는지 (폴백 매칭용)."""
+    try:
+        if chart_type in ("line", "area"):
+            return bool(_extract_timeseries_from_obj(obj))
+        if chart_type in ("bar", "scatter"):
+            xs = _resolve_path(obj, spec.get("x_field") or "")
+            ys = _resolve_path(obj, spec.get("y_field") or "")
+            return isinstance(xs, list) and isinstance(ys, list) and bool(xs) and bool(ys)
+        if chart_type == "histogram":
+            return isinstance(_resolve_path(obj, spec.get("field") or ""), list)
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
 def render_chart_png(spec: dict, tool_results: dict[str, Any]) -> bytes | None:
     """chart spec → PNG bytes. 데이터 없거나 table 이면 None.
 
     tool_results: {tool_call_id: parsed_obj}
+
+    source_tool_call_id 정확 매칭을 우선하되, single 모드처럼 에이전트가 id 를
+    지어내 매칭 실패하면 chart_type 에 맞는 데이터를 가진 tool 결과로 폴백한다.
     """
     chart_type = (spec.get("chart_type") or "line").lower()
     renderer = _RENDERERS.get(chart_type)
     if renderer is None:
         return None
+
     obj = tool_results.get(spec.get("source_tool_call_id"))
-    if obj is None:
-        return None
-    try:
-        return renderer(spec, obj)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("chart render failed (%s): %s", chart_type, e)
-        return None
+    candidates: list[Any] = []
+    if obj is not None and _spec_fits(spec, chart_type, obj):
+        candidates.append(obj)          # 1) 정확 매칭 + 데이터 적합
+    for o in tool_results.values():     # 2) 폴백 — 적합한 데이터를 가진 다른 결과
+        if o is not obj and _spec_fits(spec, chart_type, o):
+            candidates.append(o)
+    if obj is not None and obj not in candidates:
+        candidates.append(obj)          # 3) 최후 — 정확 매칭이지만 _spec_fits 판정 실패한 경우도 시도
+
+    for cand in candidates:
+        if cand is None:
+            continue
+        try:
+            png = renderer(spec, cand)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("chart render failed (%s): %s", chart_type, e)
+            png = None
+        if png:
+            return png
+    return None
