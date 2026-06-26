@@ -267,54 +267,78 @@ class SlackThreadRenderer:
             self._post(p)
 
     def _emit_report(self, markdown: str, charts_meta: list[dict]) -> None:
-        """텍스트(차트블록 제거) 게시 + 차트 PNG 첨부 + 미렌더 차트 안내. report/single 공용."""
-        cleaned, n_charts = strip_charts(markdown)
-        self._post_report(cleaned)
-        uploaded = self._upload_charts(markdown, charts_meta)
-        if n_charts > uploaded:
-            miss = n_charts - uploaded
+        """리포트를 차트 위치 그대로 게시: [앞 텍스트] → [차트 PNG] → [뒤 텍스트].
+
+        에이전트가 차트를 넣은 자리(```json-chart``` 블록)에 PNG 가 끼이도록,
+        markdown 을 차트 블록 기준으로 분할해 텍스트와 차트를 순서대로 emit 한다.
+        """
+        segments = self._split_by_charts(markdown)
+        total_specs = sum(1 for kind, _ in segments if kind == "chart")
+        uploaded = 0
+        for kind, payload in segments:
+            if kind == "text":
+                if payload.strip():
+                    self._post_report(payload)
+            else:  # chart spec
+                png = self._render_spec(payload)
+                if png:
+                    self._upload_png(payload.get("title") or f"chart-{uploaded+1}", png)
+                    uploaded += 1
+        # 스펙이 markdown 에 없고 charts 이벤트 배열만 온 경우(드묾) 보강
+        if total_specs == 0 and charts_meta:
+            for spec in charts_meta:
+                if not isinstance(spec, dict):
+                    continue
+                total_specs += 1
+                png = self._render_spec(spec)
+                if png:
+                    self._upload_png(spec.get("title") or f"chart-{uploaded+1}", png)
+                    uploaded += 1
+        if total_specs > uploaded:
+            miss = total_specs - uploaded
             if self.streamlit_url:
                 self._post(f"📊 차트 {miss}개는 데이터 매칭 실패 — 전체는 {self.streamlit_url}")
             else:
                 self._post(f"📊 차트 {miss}개는 Streamlit UI 에서 확인하세요.")
 
-    def _upload_charts(self, markdown: str, charts_meta: list[dict]) -> int:
-        """report 의 차트 스펙 → PNG 렌더 → 스레드에 첨부. 첨부한 개수 반환.
-
-        스펙 출처: markdown 의 ```json-chart``` 블록 우선, 없으면 report 이벤트 charts 배열.
-        """
-        specs: list[dict] = []
+    def _split_by_charts(self, markdown: str) -> list[tuple[str, object]]:
+        """markdown 을 [("text", str) | ("chart", spec_dict)] 시퀀스로 분할 (등장 순서 보존)."""
+        out: list[tuple[str, object]] = []
+        pos = 0
         for m in _CHART_SPEC.finditer(markdown or ""):
+            before = (markdown or "")[pos:m.start()]
+            if before.strip():
+                out.append(("text", before))
             try:
-                specs.append(json.loads(m.group(1).strip()))
+                spec = json.loads(m.group(1).strip())
+                out.append(("chart", spec))
             except json.JSONDecodeError:
-                continue
-        if not specs and charts_meta:
-            specs = [c for c in charts_meta if isinstance(c, dict)]
+                pass  # 깨진 스펙은 버림
+            pos = m.end()
+        rest = (markdown or "")[pos:]
+        if rest.strip():
+            out.append(("text", rest))
+        return out
 
-        uploaded = 0
-        for spec in specs:
-            try:
-                png = chart_renderer.render_chart_png(spec, self._tool_results)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("chart render error: %s", e)
-                png = None
-            if not png:
-                continue
-            title = spec.get("title") or f"chart-{uploaded + 1}"
-            try:
-                self.client.files_upload_v2(
-                    channel=self.channel,
-                    thread_ts=self.thread_ts,
-                    filename=f"{title[:40]}.png".replace("/", "_"),
-                    title=title,
-                    content=png,
-                    initial_comment=f"📊 {title}",
-                )
-                uploaded += 1
-            except Exception as e:  # noqa: BLE001
-                logger.warning("files_upload failed: %s", e)
-        return uploaded
+    def _render_spec(self, spec: dict) -> bytes | None:
+        try:
+            return chart_renderer.render_chart_png(spec, self._tool_results)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("chart render error: %s", e)
+            return None
+
+    def _upload_png(self, title: str, png: bytes) -> None:
+        try:
+            self.client.files_upload_v2(
+                channel=self.channel,
+                thread_ts=self.thread_ts,
+                filename=f"{title[:40]}.png".replace("/", "_"),
+                title=title,
+                content=png,
+                initial_comment=f"📊 {title}",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("files_upload failed: %s", e)
 
     def handle(self, ev: dict) -> None:
         etype = ev.get("type")
