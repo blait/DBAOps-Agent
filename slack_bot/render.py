@@ -3,15 +3,24 @@
 agentcore_client.invoke_stream 이 yield 하는 이벤트(start/stage/message/validation/
 report/done/error)를 받아 Slack 스레드를 실시간 업데이트한다.
 
-테스트 단계: 차트는 텍스트로(요약) + 전체는 Streamlit 안내. PNG 첨부는 후속.
+- 텍스트 리포트: 표준 Markdown → Slack mrkdwn 변환(표는 코드블록/레코드).
+- 차트: report 의 json-chart 스펙 + tool 결과 데이터 → matplotlib PNG → files_upload.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 import unicodedata
 
-# report markdown 의 ```json-chart ...``` 펜스 제거용
+import charts as chart_renderer
+
+logger = logging.getLogger(__name__)
+
+# report markdown 의 ```json-chart {스펙} ``` — 스펙 본문 캡처
+_CHART_SPEC = re.compile(r"```json-chart\s*\n(.*?)\n```", re.DOTALL)
+# report markdown 의 ```json-chart ...``` 펜스 제거용(텍스트에서 차트블록 삭제)
 _CHART_FENCE = re.compile(r"```json-chart\s*\n.*?\n```", re.DOTALL)
 # 일반 코드펜스(```...```)는 보존해야 하므로 변환 시 잠시 빼둔다.
 _CODE_FENCE = re.compile(r"```.*?```", re.DOTALL)
@@ -231,6 +240,7 @@ class SlackThreadRenderer:
         self._tool_calls = 0
         self._reported = False          # report 이벤트로 본문을 이미 게시했는지
         self._last_ai_text = ""         # single 모드: 마지막 ai 본문(최종 답변 후보)
+        self._tool_results: dict[str, object] = {}  # tool_call_id → parsed obj (차트 데이터)
 
     def _update_status(self, text: str) -> None:
         try:
@@ -256,6 +266,44 @@ class SlackThreadRenderer:
         for p in parts:
             self._post(p)
 
+    def _upload_charts(self, markdown: str, charts_meta: list[dict]) -> int:
+        """report 의 차트 스펙 → PNG 렌더 → 스레드에 첨부. 첨부한 개수 반환.
+
+        스펙 출처: markdown 의 ```json-chart``` 블록 우선, 없으면 report 이벤트 charts 배열.
+        """
+        specs: list[dict] = []
+        for m in _CHART_SPEC.finditer(markdown or ""):
+            try:
+                specs.append(json.loads(m.group(1).strip()))
+            except json.JSONDecodeError:
+                continue
+        if not specs and charts_meta:
+            specs = [c for c in charts_meta if isinstance(c, dict)]
+
+        uploaded = 0
+        for spec in specs:
+            try:
+                png = chart_renderer.render_chart_png(spec, self._tool_results)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("chart render error: %s", e)
+                png = None
+            if not png:
+                continue
+            title = spec.get("title") or f"chart-{uploaded + 1}"
+            try:
+                self.client.files_upload_v2(
+                    channel=self.channel,
+                    thread_ts=self.thread_ts,
+                    filename=f"{title[:40]}.png".replace("/", "_"),
+                    title=title,
+                    content=png,
+                    initial_comment=f"📊 {title}",
+                )
+                uploaded += 1
+            except Exception as e:  # noqa: BLE001
+                logger.warning("files_upload failed: %s", e)
+        return uploaded
+
     def handle(self, ev: dict) -> None:
         etype = ev.get("type")
 
@@ -273,7 +321,16 @@ class SlackThreadRenderer:
         elif etype == "message":
             msg = ev.get("message") or {}
             role = msg.get("role")
-            if role == "ai":
+            if role == "tool":
+                # 차트가 참조할 tool 결과를 tool_call_id 로 보관.
+                tcid = msg.get("tool_call_id")
+                txt = msg.get("text") or ""
+                if tcid and txt:
+                    try:
+                        self._tool_results[tcid] = json.loads(txt)
+                    except json.JSONDecodeError:
+                        pass
+            elif role == "ai":
                 tcs = msg.get("tool_calls") or []
                 for _ in tcs:
                     self._tool_calls += 1
@@ -294,12 +351,19 @@ class SlackThreadRenderer:
                 self._update_status(f"⚠️ 검증 이슈: {kinds} — 보정 중")
 
         elif etype == "report":
-            cleaned, n_charts = strip_charts(ev.get("markdown", ""))
-            if n_charts and self.streamlit_url:
-                cleaned += f"\n\n📊 차트 {n_charts}개 — 전체 시각화는 {self.streamlit_url}"
-            elif n_charts:
-                cleaned += f"\n\n📊 차트 {n_charts}개 (Streamlit UI 에서 시각화)"
+            markdown = ev.get("markdown", "")
+            cleaned, n_charts = strip_charts(markdown)
+            # 1) 텍스트 리포트 먼저 게시
             self._post_report(cleaned)
+            # 2) 차트 PNG 렌더 후 첨부
+            uploaded = self._upload_charts(markdown, ev.get("charts") or [])
+            # 3) 렌더 못 한 차트가 있으면 Streamlit 안내
+            if n_charts > uploaded:
+                miss = n_charts - uploaded
+                if self.streamlit_url:
+                    self._post(f"📊 차트 {miss}개는 데이터 매칭 실패 — 전체는 {self.streamlit_url}")
+                else:
+                    self._post(f"📊 차트 {miss}개는 Streamlit UI 에서 확인하세요.")
             self._reported = True
 
         elif etype == "done":
