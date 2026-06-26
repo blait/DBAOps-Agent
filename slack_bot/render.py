@@ -12,6 +12,8 @@ import re
 
 # report markdown 의 ```json-chart ...``` 펜스 제거용
 _CHART_FENCE = re.compile(r"```json-chart\s*\n.*?\n```", re.DOTALL)
+# 일반 코드펜스(```...```)는 보존해야 하므로 변환 시 잠시 빼둔다.
+_CODE_FENCE = re.compile(r"```.*?```", re.DOTALL)
 
 _STAGE_LABEL = {
     "domain": "🔎 도메인 분석",
@@ -28,12 +30,114 @@ def strip_charts(markdown: str) -> tuple[str, int]:
     return cleaned, len(charts)
 
 
+# ─────────────────── 표준 Markdown → Slack mrkdwn ───────────────────
+# Slack 은 표준 MD 를 렌더하지 않고 mrkdwn 을 쓴다:
+#   **굵게** → *굵게*,  ## 제목 → *제목*,  [a](b) → <b|a>,  표 → 코드블록 정렬.
+
+def _md_table_to_code(block: str) -> str:
+    """| a | b | 형태의 MD 표를 monospace 코드블록으로 정렬 변환 (Slack 은 표 미지원)."""
+    lines = [ln for ln in block.splitlines() if ln.strip()]
+    rows = []
+    for ln in lines:
+        if re.match(r"^\s*\|?\s*[:\- ]+\|[:\-| ]*$", ln):  # 구분선(---|---) 건너뜀
+            continue
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        rows.append(cells)
+    if not rows:
+        return block
+    ncol = max(len(r) for r in rows)
+    rows = [r + [""] * (ncol - len(r)) for r in rows]
+    widths = [max(len(r[i]) for r in rows) for i in range(ncol)]
+    out = []
+    for ri, r in enumerate(rows):
+        out.append("  ".join(c.ljust(widths[i]) for i, c in enumerate(r)).rstrip())
+        if ri == 0:  # 헤더 밑줄
+            out.append("  ".join("-" * widths[i] for i in range(ncol)))
+    return "```\n" + "\n".join(out) + "\n```"
+
+
+def _convert_tables(text: str) -> str:
+    """연속된 표 라인 블록을 찾아 코드블록으로 치환."""
+    lines = text.splitlines()
+    out, buf = [], []
+
+    def flush():
+        if buf:
+            out.append(_md_table_to_code("\n".join(buf)))
+            buf.clear()
+
+    for ln in lines:
+        if "|" in ln and ln.strip().startswith("|"):
+            buf.append(ln)
+        else:
+            flush()
+            out.append(ln)
+    flush()
+    return "\n".join(out)
+
+
+def md_to_mrkdwn(text: str) -> str:
+    """표준 Markdown 을 Slack mrkdwn 으로 변환. 코드펜스는 보존."""
+    if not text:
+        return ""
+    # 1) 코드펜스 보호 (placeholder 로 치환)
+    fences: list[str] = []
+
+    def _stash(m):
+        fences.append(m.group(0))
+        return f"\x00FENCE{len(fences) - 1}\x00"
+
+    text = _CODE_FENCE.sub(_stash, text)
+
+    # 2) 표 변환 (코드블록 산출 → 다시 stash 안 해도 됨, 변환 후 그대로 둠)
+    text = _convert_tables(text)
+
+    # 3) 헤더 ##/### → *굵게* (한 줄)
+    text = re.sub(r"^#{1,6}\s+(.*)$", r"*\1*", text, flags=re.MULTILINE)
+    # 4) **굵게**/__굵게__ → *굵게*
+    text = re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
+    text = re.sub(r"__(.+?)__", r"*\1*", text)
+    # 5) [텍스트](url) → <url|텍스트>
+    text = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"<\2|\1>", text)
+    # 6) 불릿 -, * → •
+    text = re.sub(r"^(\s*)[-*]\s+", r"\1• ", text, flags=re.MULTILINE)
+
+    # 7) 코드펜스 복원
+    def _restore(m):
+        return fences[int(m.group(1))]
+
+    text = re.sub(r"\x00FENCE(\d+)\x00", _restore, text)
+    return text
+
+
 def truncate(text: str, limit: int = 2900) -> str:
     """Slack 텍스트 블록 한도(3000자) 대비 안전 truncate."""
     text = text or ""
     if len(text) <= limit:
         return text
     return text[:limit] + "\n…(생략)"
+
+
+def chunk_for_slack(text: str, limit: int = 2900) -> list[str]:
+    """긴 본문을 Slack 메시지 한도(3000자) 이하 여러 조각으로 — 코드블록/문단 경계 우선."""
+    text = text or ""
+    if len(text) <= limit:
+        return [text] if text else []
+    chunks, cur = [], ""
+    for para in text.split("\n\n"):
+        piece = (para + "\n\n")
+        if len(cur) + len(piece) > limit:
+            if cur:
+                chunks.append(cur.rstrip())
+                cur = ""
+            # 단일 문단이 한도 초과면 강제 분할
+            while len(piece) > limit:
+                chunks.append(piece[:limit])
+                piece = piece[limit:]
+        cur += piece
+    if cur.strip():
+        chunks.append(cur.rstrip())
+    return chunks
 
 
 class SlackThreadRenderer:
@@ -67,6 +171,16 @@ class SlackThreadRenderer:
             )
         except Exception:  # noqa: BLE001
             pass
+
+    def _post_report(self, markdown: str) -> None:
+        """markdown → mrkdwn 변환 후 길면 여러 메시지로 분할 게시."""
+        body = md_to_mrkdwn(markdown)
+        parts = chunk_for_slack(body)
+        if not parts:
+            self._post("_(빈 리포트)_")
+            return
+        for p in parts:
+            self._post(p)
 
     def handle(self, ev: dict) -> None:
         etype = ev.get("type")
@@ -107,18 +221,17 @@ class SlackThreadRenderer:
 
         elif etype == "report":
             cleaned, n_charts = strip_charts(ev.get("markdown", ""))
-            body = truncate(cleaned)
             if n_charts and self.streamlit_url:
-                body += f"\n\n📊 차트 {n_charts}개 — 전체 시각화는 {self.streamlit_url}"
+                cleaned += f"\n\n📊 차트 {n_charts}개 — 전체 시각화는 {self.streamlit_url}"
             elif n_charts:
-                body += f"\n\n📊 차트 {n_charts}개 (Streamlit UI 에서 시각화)"
-            self._post(body or "_(빈 리포트)_")
+                cleaned += f"\n\n📊 차트 {n_charts}개 (Streamlit UI 에서 시각화)"
+            self._post_report(cleaned)
             self._reported = True
 
         elif etype == "done":
             # single 모드는 report 이벤트가 없으므로 마지막 ai 본문을 최종 답변으로 게시.
             if not self._reported and self._last_ai_text.strip():
-                self._post(truncate(self._last_ai_text))
+                self._post_report(self._last_ai_text)
                 self._reported = True
             self._update_status(f"✅ 완료 (메시지 {ev.get('n_messages', '?')} · "
                                 f"tool calls {self._tool_calls})")
