@@ -86,11 +86,26 @@ def _truncate(obj: Any, max_chars: int = 12000) -> str:
 
 
 def _make_invoker(client: MCPClient, full_name: str, max_chars: int):
-    """Closure factory — full_name 은 Gateway namespacing 포함된 도구 이름."""
+    """Closure factory — full_name 은 Gateway namespacing 포함된 도구 이름.
+
+    도구 호출이 실패해도 예외를 밖으로 던지지 않고 에러 문자열을 반환한다.
+    그래야 모든 tool_call 에 대응하는 ToolMessage 가 생겨 LangGraph 가
+    INVALID_CHAT_HISTORY 로 죽지 않고(특히 병렬 호출 중 일부만 실패할 때),
+    에이전트가 그 에러를 읽고 다른 도구·다른 인자로 우회할 수 있다.
+    """
     def _invoke(**kwargs) -> str:
         # None 값은 제거 — 백엔드가 missing/None 둘 다 허용 못 할 수 있음
         args = {k: v for k, v in kwargs.items() if v is not None}
-        result = client.call(full_name, args)
+        try:
+            result = client.call(full_name, args)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("tool %s failed: %s", full_name, e)
+            return _truncate(
+                {"error": str(e),
+                 "tool": full_name,
+                 "hint": "이 호출은 실패했다. 같은 호출을 반복하지 말고 인자를 고치거나 다른 도구로 우회하라."},
+                max_chars=max_chars,
+            )
         return _truncate(result if result is not None else {}, max_chars=max_chars)
     return _invoke
 

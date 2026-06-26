@@ -265,7 +265,13 @@ def _chart_bar(spec: dict, obj: Any) -> bytes | None:
         return None
     pairs = []
     for x, y in zip(xs, ys):
-        f = _to_float(y)
+        # y 가 리스트(예: 인스턴스별 datapoints[*].value)면 평균내 단일 막대값으로.
+        if isinstance(y, list):
+            nums = [_to_float(v) for v in y]
+            nums = [n for n in nums if n is not None]
+            f = sum(nums) / len(nums) if nums else None
+        else:
+            f = _to_float(y)
         if f is None or x is None:
             continue
         pairs.append((str(x)[:40], f))
