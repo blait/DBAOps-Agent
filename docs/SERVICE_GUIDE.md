@@ -1,6 +1,17 @@
 # DBAOps-Agent — 서비스 가이드
 
-DB / 인프라 분석을 자동화하는 에이전트 서비스. 사용자가 자연어로 "최근 1시간 EC2 CPU peak 보여줘" 라고 물으면, AI 분석가가 도구를 직접 골라 호출하고 → 검증 단계로 거짓말이나 인용 누락을 거른 다음 → 차트 포함 markdown 리포트를 만들어 보여준다.
+DB / 인프라 분석을 자동화하는 에이전트 서비스. 자연어로 질문하면 AI 분석가가 도구를 직접 골라 호출하고 답한다.
+
+> **⚠️ 아키텍처 변경 안내 (2026-06)**
+>
+> 현재 배포 방식은 **올인원 EC2 + docker compose** (AgentCore/Gateway/Lambda 없음).
+> - 배포 가이드: [`deploy/ec2-allinone/README.md`](../deploy/ec2-allinone/README.md)
+> - 통합 온보딩: [`docs/ONBOARDING.md`](ONBOARDING.md)
+> - Slack 연동: [`deploy/ec2-allinone/SLACK_SETUP.md`](../deploy/ec2-allinone/SLACK_SETUP.md)
+>
+> 아래 문서의 AgentCore Runtime/Gateway/Cognito/Lambda 설명은 **초기 PoC 시절 구조**이며,
+> 현재 코드 동작을 이해하는 데는 참고용으로만 활용할 것.
+> 현행 핵심 코드: `mcp_router/`, `agent/src/dbaops_agent/single_graph.py`, `slack_bot/bot.py`.
 
 본 문서는 코드를 그대로 옮긴 가이드다. 추측 없이 실제 파일·라인·등록된 도구만 적었다.
 

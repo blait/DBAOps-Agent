@@ -15,50 +15,17 @@ from components import view_connections, view_generators, view_swarm
 AGENT_HTTP_URL = os.environ.get("AGENT_HTTP_URL", "")
 SHOW_GENERATORS = os.environ.get("SHOW_GENERATORS", "false").lower() in ("1", "true", "yes")
 
-st.set_page_config(page_title="DBAOps-Agent", layout="wide")
-st.title("DBAOps-Agent")
-st.caption("LangGraph + MCP — 3 도메인 에이전트 (OS·인프라 / DB 성능 / 로그) + 단일 RCA 에이전트")
+st.set_page_config(page_title="DBAOps Agent", layout="wide")
+st.title("DBAOps Agent")
+st.caption("LangGraph + MCP — DB/인프라 RCA 분석 에이전트")
 
 # ───────────────────────── 세션 상태 ─────────────────────────
 SUPERVISORS: list[dict] = [
     {
-        "key":   "os_metric",
-        "label": "🖥️ OS·인프라 메트릭 분석",
-        "tab":   "🖥️ OS·인프라 메트릭",
-        "responsibility": "OS·호스트 레이어 메트릭(CPU/메모리/디스크/네트워크) 추세·이상 탐지·임계치 도달 시점 분석",
-        "input_hint":     "주요 입력: 시간 범위",
-        "deliverable":    "분석 → 검증 → 리포트 (markdown + 자동 차트)",
-        "example":        "예: 'EC2 prometheus 의 최근 1시간 CPU peak 시점과 baseline 대비 격차 분석'",
-        "mode":           "pipeline",
-        "domain":         "os_metric",
-    },
-    {
-        "key":   "db_metric",
-        "label": "🗄️ DB 성능 메트릭 분석",
-        "tab":   "🗄️ DB 성능 메트릭",
-        "responsibility": "DBMS·Kafka 클러스터 내부 성능 메트릭 정량 분석 (TPS/QPS/Lock/Cache hit/Lag/ISR)",
-        "input_hint":     "주요 입력: 시간 범위",
-        "deliverable":    "분석 → 검증 → 리포트 (markdown + 자동 차트)",
-        "example":        "예: 'MySQL slow_log 최근 30분 TOP 5 / Kafka dbaops.orders consumer lag 추세'",
-        "mode":           "pipeline",
-        "domain":         "db_metric",
-    },
-    {
-        "key":   "log",
-        "label": "📜 로그 분석",
-        "tab":   "📜 로그 분석",
-        "responsibility": "Error/Slow/Audit/시스템 로그 패턴 분류, 빈발 에러 탐지, RCA 후보 도출",
-        "input_hint":     "주요 입력: 시간 범위 / 키워드",
-        "deliverable":    "분석 → 검증 → 리포트 (markdown + 자동 차트)",
-        "example":        "예: 'Aurora PG 최근 1시간 deadlock / FATAL 빈도와 시간 분포'",
-        "mode":           "pipeline",
-        "domain":         "log",
-    },
-    {
         "key":   "single",
-        "label": "🧠 단일 에이전트 (RCA)",
-        "tab":   "🧠 단일 에이전트",
-        "responsibility": "한 명의 RCA 분석가가 모든 도구를 직접 사용. handoff 없음, 카테고리 경계 없음. 비교용.",
+        "label": "🤖 DBAOps Agent",
+        "tab":   "🤖 DBAOps Agent",
+        "responsibility": "한 명의 RCA 분석가가 모든 도구(DB·메트릭·로그·PI·Prometheus)를 직접 사용해 종합 분석.",
         "input_hint":     "주요 입력: 시간 범위 + 자연어 질문",
         "deliverable":    "분류 + 발견 사실(인용 포함) + 가설(hedging) + 권고",
         "example":        "예: 'Aurora 최근 1시간 어디서 병목이 났는지 메트릭/로그/PI 종합해서 분석'",
@@ -105,7 +72,7 @@ with st.sidebar:
     )
 
     st.divider()
-    if st.button("🗑 모든 supervisor 대화 초기화", use_container_width=True):
+    if st.button("🗑 대화 초기화", use_container_width=True):
         for s in SUPERVISORS:
             st.session_state[f"history__{s['key']}"] = []
             st.session_state[f"session_id__{s['key']}"] = str(uuid.uuid4())[:8]
@@ -117,8 +84,7 @@ with st.sidebar:
     else:
         st.caption(f"runtime: `{runtime_arn.rsplit('/',1)[-1] or '(unset)'}`")
     for s in SUPERVISORS:
-        st.caption(f"{s['tab']} session: `{st.session_state[f'session_id__{s['key']}']}`")
-    st.caption("🧪 시나리오 트리거는 **시나리오 라이브 모니터** 탭으로 이동했습니다.")
+        st.caption(f"session: `{st.session_state[f'session_id__{s['key']}']}`")
 
 
 # ───────────────────────── 직전 컨텍스트 헬퍼 ─────────────────────────

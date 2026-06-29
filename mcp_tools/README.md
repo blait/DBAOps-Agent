@@ -1,16 +1,14 @@
 # MCP Tools
 
-AgentCore Gateway 뒤에 Lambda 타겟으로 등록되는 MCP 도구 6종.
+커스텀 MCP 도구 핸들러 4종. `mcp_router`가 직접 import 하여 호출한다.
 
-| 도구 | 입력 | 출력 (요약 JSON, ≤100 KB) |
+| 디렉토리 | 도구 | 설명 |
 |---|---|---|
-| `prometheus_query` | promql, range | timeseries [{ts, value}] |
-| `cloudwatch_metrics` | namespace, metric, dims, range, stat | timeseries |
-| `rds_pi` | db_id, range, group_by | top SQL by AAS |
-| `sql_readonly` | sql, db_id, engine | rows (LIMIT 1000), AST 검증 |
-| `msk_metrics` | cluster_arn, metric, range | timeseries |
-| `s3_log_fetch` | bucket, key, byte_range, regex | matched lines |
+| `rds_performance_insights/` | `rds-pi` | RDS PI top SQL by AAS, wait events |
+| `msk_metrics/` | `msk-metrics` | MSK/Kafka CloudWatch 메트릭 조회 |
+| `s3_log_fetch/` | `s3-log-fetch` | S3 gzip 로그 byte-range + regex |
+| `aws_api/` | `aws-api` | RDS/EC2/MSK describe + PI dimension (sub-tool 7개) |
 
-각 디렉토리는 `handler.py`, `requirements.txt` (필요 시), `tool_io.json` (Gateway target schema) 를 포함한다.
+각 디렉토리에 `handler.py` + `tool_io.json`(입출력 스키마). 라우터가 `handler({"body": args, "tool_name": sub}, None)` 으로 호출.
 
-배포는 Terraform `infra/modules/agentcore` 가 zip 패키징 후 `CreateGatewayTarget` 으로 등록.
+이 외 6종(community-postgres, community-mysql, community-prometheus, awslabs-cloudwatch, awslabs-aws-api, awslabs-aws-doc)은 오픈소스 MCP 서버를 stdio 로 spawn — `mcp_router/stdio_proxy.py` 참조.

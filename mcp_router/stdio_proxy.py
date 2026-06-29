@@ -132,11 +132,12 @@ class StdioProxy:
         sess = self._sessions.get(target)
         return sess.tools if sess else []
 
-    def call(self, target: str, sub_tool: str, args: dict[str, Any]) -> Any:
+    def call(self, target: str, sub_tool: str, args: dict[str, Any],
+             timeout: float = _CALL_TIMEOUT) -> Any:
         sess = self._sessions.get(target)
         if sess is None:
             raise RuntimeError(f"stdio target '{target}' not connected")
-        return self._submit(sess.call(sub_tool, args)).result(timeout=_CALL_TIMEOUT)
+        return self._submit(sess.call(sub_tool, args)).result(timeout=timeout)
 
     def disconnect(self, target: str) -> None:
         with self._lock:

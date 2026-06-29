@@ -116,28 +116,26 @@ docker compose logs -f slack-bot
 /invite @DBAOps
 
 # 멘션해서 질문
-@DBAOps 최근 1시간 RDS 인스턴스 상태와 엔진 종류 알려줘
+@DBAOps 최근 1시간 Aurora CPU 어때?
 ```
 
 흐름:
-1. 봇이 **도메인 선택 버튼** 제시 (🖥️ OS·인프라 / 🗄️ DB 성능 / 📜 로그 / 🧠 단일 RCA)
-2. 버튼 클릭 → 스레드에 진행상황 실시간 갱신 ("🔧 도구 호출…" → "✅ 검증 통과")
-3. 최종 리포트(markdown) 게시. 차트가 있으면 PNG 로 첨부
+1. 멘션하면 봇이 **바로 답을 시작**한다 (버튼 없음, 대화형).
+2. 스레드에 진행상황 표시 ("⏳ 확인 중…" → "💬 Aurora CPU 메트릭 볼게요" → "✅ 완료")
+3. 최종 답변 게시. 차트가 있으면 PNG 첨부.
 
 ### 4-1. 스레드에서 이어 묻기 (대화 연속성)
 
-**같은 스레드 = 같은 세션.** 한 번 모드를 고른 스레드에서는 멘션 없이 그냥 이어 말하면
-**직전과 같은 모드로** 실행되고, 에이전트가 **이전 대화 맥락을 기억**한다.
+**같은 스레드 = 같은 세션.** 멘션 없이 그냥 이어 말하면 에이전트가
+**이전 대화 맥락을 기억**하며 자연스럽게 이어간다.
 
 ```
-@DBAOps 최근 1시간 RDS CPU 분석      ← 멘션 → 모드 버튼
-  [🖥️ OS·인프라] 클릭                ← 분석 실행
-  ↳ 그럼 메모리는?                    ← 멘션 없이 입력 → 같은 모드로 이어서 분석
-  ↳ top 5만 다시 보여줘               ← 직전 결과를 기억한 채 이어감
+@DBAOps 최근 1시간 Aurora CPU 어때?   ← 멘션 → 바로 분석 시작
+  ↳ 그럼 메모리는?                    ← 멘션 없이 → 같은 세션으로 이어서 답
+  ↳ slow query 있었어?                ← 맥락 기억한 채 이어감
 ```
 
 - 세션 키 = Slack 스레드 타임스탬프(`thread_ts`). 새 멘션(새 스레드)은 새 대화.
-- 모드를 아직 안 고른 스레드에서 그냥 말하면 봇이 먼저 모드 버튼을 띄운다.
 - 맥락은 agent 컨테이너 메모리(InMemorySaver)에 보관 — **agent 재시작 시 초기화**된다.
 
 > 2-3 의 `message.*` 이벤트가 켜져 있어야 후속 질문이 동작한다. 안 켜져 있으면
@@ -166,9 +164,8 @@ Slack ──outbound wss(Socket Mode)── [slack-bot 컨테이너]
 |---|---|
 | 봇이 오프라인 | `docker compose logs slack-bot` — 토큰 오타/만료, App Token scope `connections:write` |
 | 멘션 무반응 | Event Subscriptions 에 `app_mention` 구독됐나, 채널에 `/invite` 했나 |
-| 스레드 후속질문 무반응 | 2-3 의 `message.channels`(또는 groups/im) 구독 + 재설치했나, 해당 스레드에서 모드를 한 번 골랐나 |
+| 스레드 후속질문 무반응 | 2-3 의 `message.channels`(또는 groups/im) 구독 + 재설치했나, 해당 스레드에서 멘션으로 대화를 시작했나 |
 | 후속질문이 새 대화처럼 | agent 가 재시작됐나(InMemorySaver 휘발), 같은 스레드에서 묻고 있나 |
-| 버튼 눌러도 무반응 | Interactivity 활성화됐나, agent 컨테이너 Up 인지(`docker compose ps`) |
 | "실행 오류" | agent 로그(`docker compose logs agent`), `bedrock:InvokeModel` 권한, 라우터 상태 |
 | 토큰 갱신 후 | `docker compose up -d slack-bot` 재기동(`.env` 다시 읽음) |
 

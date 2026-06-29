@@ -42,11 +42,16 @@ def _truncate(obj: Any, max_chars: int = 8000) -> str:
 
 @tool
 def prometheus_query(query: str, time: str | None = None) -> str:
-    """[OS/Host metric · instant] EC2 self-hosted Prometheus 의 한 시점 PromQL 평가 (pab1it0/prometheus-mcp-server).
+    """[Prometheus metric · instant] self-hosted Prometheus 의 한 시점 PromQL 평가 (pab1it0/prometheus-mcp-server).
 
-    Use this for a single point-in-time host metric reading from node_exporter. For trends use
-    prometheus_range_query. Prefer this over cloudwatch_metric when the metric is host-level
-    (load, fd, conntrack, fs.* — CloudWatch does not have these).
+    이 Prometheus 는 node_exporter(호스트 OS) 뿐 아니라 **postgres_exporter / mysqld_exporter
+    로 수집한 RDS 내부 지표**도 담고 있다. 따라서 다음 계열은 전부 이 도구로 질의한다:
+      - DB exporter: pg_up, mysql_up, pg_stat_activity_count, pg_database_size_bytes,
+        pg_stat_*, mysql_global_status_*, mysql_global_variables_* 등
+      - 호스트 OS: node_* (load, fd, conntrack, fs.*)
+    주의: 이런 exporter 메트릭은 awslabs cloudwatch 의 PromQL(execute_promql_query)에는 **없다**
+    (그쪽은 CloudWatch vended 메트릭 전용). pg_*/mysql_*/node_* 이름은 반드시 이 도구를 쓴다.
+    For trends use prometheus_range_query.
 
     Args:
         query: PromQL one-liner (instant vector compatible).
@@ -63,11 +68,12 @@ def prometheus_query(query: str, time: str | None = None) -> str:
 
 @tool
 def prometheus_range_query(query: str, start: str, end: str, step: str = "30s") -> str:
-    """[OS/Host metric · range] EC2 self-hosted Prometheus 의 시계열 PromQL 평가 (pab1it0/prometheus-mcp-server).
+    """[Prometheus metric · range] self-hosted Prometheus 의 시계열 PromQL 평가 (pab1it0/prometheus-mcp-server).
 
-    Use this for host-level OS metric trends from node_exporter. The exporter set on the host
-    determines which metric names exist — verify with prometheus_query first if uncertain about
-    a metric name. Do not assume a metric exists from training data alone.
+    node_exporter(호스트 OS) 와 **postgres_exporter/mysqld_exporter 로 수집한 RDS 내부 지표**
+    (pg_*, mysql_*, node_*) 의 추세를 본다. 이 exporter 메트릭은 cloudwatch PromQL 에는 없으니
+    pg_*/mysql_*/node_* 은 반드시 이 도구를 쓴다. 어떤 metric 이름이 존재하는지 불확실하면
+    prometheus_query 로 먼저 확인한다. training data 만으로 metric 존재를 가정하지 말 것.
 
     step sizing:
       - 결과 점 수 = (end - start) / step. range/step 가 ≈ 50~120 정도가 적당.

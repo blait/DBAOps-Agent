@@ -63,3 +63,7 @@ lambda_package/
 **/tfplan
 **/tfplan.bin
 ui/streamlit/streamlit.log
+
+# Prometheus exporter 비밀번호 파일 (예시만 커밋)
+deploy/ec2-allinone/prometheus/my.cnf
+deploy/ec2-allinone/connections.json

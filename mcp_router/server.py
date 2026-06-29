@@ -3,8 +3,9 @@
 에이전트의 tools/mcp_client.py 가 GATEWAY_ENDPOINT 로 보내는 MCP JSON-RPC 를 그대로 처리:
   POST /mcp   {"jsonrpc":"2.0","id":..,"method":"tools/list","params":{...}}
               {"jsonrpc":"2.0","id":..,"method":"tools/call","params":{"name":..,"arguments":..}}
-  GET  /healthz                 → 전체 target 상태
-  GET  /healthz?tool=<target>   → 특정 target 상태 (UI 연결테스트)
+  GET  /healthz                 → 전체 target 상태 (tools/list 도달만 확인, 빠름)
+  GET  /healthz?tool=<target>   → 특정 target 상태
+  GET  /healthz?tool=<t>&verify=1 → DB/Prometheus 는 실제 probe 쿼리로 진짜 연결 확인 (UI 연결테스트)
 
 응답은 Gateway 와 동일하게 result.content[0].text(JSON 문자열) 형태로 돌려준다 —
 mcp_client._invoke 가 그 text 를 json.loads 한다.
@@ -57,8 +58,9 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path in ("/healthz", "/ping"):
             qs = parse_qs(parsed.query)
             target = (qs.get("tool") or [None])[0]
+            verify = (qs.get("verify") or ["0"])[0] in ("1", "true", "yes")
             try:
-                status = get_registry().health(target)
+                status = get_registry().health(target, verify=verify)
                 self._send(200, {"status": "ok", "targets": status})
             except Exception as e:  # noqa: BLE001
                 logger.exception("health failed")

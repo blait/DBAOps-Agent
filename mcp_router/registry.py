@@ -21,6 +21,15 @@ from .stdio_proxy import StdioProxy
 logger = logging.getLogger(__name__)
 
 
+def _probe_err_text(res: dict[str, Any]) -> str:
+    """MCP tools/call 결과의 content[].text 를 이어붙여 반환(에러 판정용)."""
+    parts = []
+    for c in res.get("content") or []:
+        if isinstance(c, dict) and c.get("type") == "text" and c.get("text"):
+            parts.append(c["text"])
+    return " ".join(parts).strip()
+
+
 class Registry:
     def __init__(self) -> None:
         self._custom = CustomToolHost()
@@ -101,8 +110,46 @@ class Registry:
 
     # ─────────── health ───────────
 
-    def health(self, target: str | None = None) -> dict[str, Any]:
-        """전체 또는 특정 target 상태. UI 연결테스트용."""
+    # target → (sub_tool, args). 실제 연결을 검증하는 가벼운 read-only probe.
+    # verify=True 일 때만 사용. 여기 없는 stdio target 은 tools/list 도달만 확인.
+    _PROBES: dict[str, tuple[str, dict[str, Any]]] = {
+        "community-postgres":   ("execute_sql", {"sql": "SELECT 1"}),
+        "community-mysql":      ("mysql_query", {"sql": "SELECT 1"}),
+        "community-prometheus": ("execute_query", {"query": "up"}),
+    }
+    _PROBE_TIMEOUT = 15.0
+
+    def _probe(self, t: str) -> dict[str, Any] | None:
+        """실제 read-only 쿼리를 1회 날려 진짜 연결되는지 확인.
+
+        반환: 성공 시 {"ok": True}, 실패 시 {"ok": False, "error": ...}.
+        probe 정의가 없는 target 은 None(상위에서 tools/list 기준으로 판단).
+        """
+        probe = self._PROBES.get(t)
+        if probe is None:
+            return None
+        sub_tool, args = probe
+        try:
+            res = self._stdio.call(t, sub_tool, args, timeout=self._PROBE_TIMEOUT)
+        except Exception as e:  # noqa: BLE001  (timeout/연결 끊김 등)
+            return {"ok": False, "error": f"probe failed: {type(e).__name__}: {e}"}
+        # MCP 결과가 isError 거나, content 텍스트가 에러 메시지면 실패로 본다.
+        if isinstance(res, dict):
+            if res.get("isError"):
+                return {"ok": False, "error": _probe_err_text(res)}
+            txt = _probe_err_text(res)
+            if txt and txt.lower().startswith("error"):
+                return {"ok": False, "error": txt}
+        return {"ok": True}
+
+    def health(self, target: str | None = None, verify: bool = False) -> dict[str, Any]:
+        """전체 또는 특정 target 상태. UI 연결테스트용.
+
+        verify=False: stdio 세션이 떴는지(tools/list)만 본다 — 빠르지만 DB 실접속은
+                      확인 못 함(MCP 서버는 DB 없이도 tools/list 가 됨).
+        verify=True : DB/Prometheus 는 실제 read-only probe 쿼리를 1회 날려 진짜 연결을
+                      확인한다. UI '연결 테스트' 버튼이 사용.
+        """
         self.reload()
         cfg = self._cfg
         enabled = set(connections.enabled_targets(cfg))
@@ -117,19 +164,29 @@ class Registry:
                     return {"enabled": True, "ok": True, "tools": n}
                 except Exception as e:  # noqa: BLE001
                     return {"enabled": True, "ok": False, "error": str(e), "tools": 0}
-            # stdio
+            # stdio: 우선 세션을 보장(연결 안 됐으면 재시도)
             if t in connected:
-                return {"enabled": True, "ok": True, "tools": len(self._stdio.list_tools(t))}
-            # enabled 인데 연결 안 됨 → 재시도
-            conf = cfg["tools"].get(t, {})
-            spec = connections.stdio_spec(t, conf, cfg.get("aws_region", "ap-northeast-2"))
-            if spec is None:
-                return {"enabled": True, "ok": False, "error": "connection config incomplete", "tools": 0}
-            try:
-                toolset = self._stdio.ensure(t, spec)
-                return {"enabled": True, "ok": True, "tools": len(toolset)}
-            except Exception as e:  # noqa: BLE001
-                return {"enabled": True, "ok": False, "error": str(e), "tools": 0}
+                base = {"enabled": True, "ok": True, "tools": len(self._stdio.list_tools(t))}
+            else:
+                conf = cfg["tools"].get(t, {})
+                spec = connections.stdio_spec(t, conf, cfg.get("aws_region", "ap-northeast-2"))
+                if spec is None:
+                    return {"enabled": True, "ok": False,
+                            "error": "connection config incomplete", "tools": 0}
+                try:
+                    toolset = self._stdio.ensure(t, spec)
+                    base = {"enabled": True, "ok": True, "tools": len(toolset)}
+                except Exception as e:  # noqa: BLE001
+                    return {"enabled": True, "ok": False, "error": str(e), "tools": 0}
+            # verify: 세션은 떴지만 DB 에 실제로 붙는지 probe 로 확정
+            if verify:
+                pr = self._probe(t)
+                if pr is not None and not pr["ok"]:
+                    return {"enabled": True, "ok": False, "verified": False,
+                            "error": pr["error"], "tools": base["tools"]}
+                if pr is not None:
+                    base["verified"] = True
+            return base
 
         if target:
             return {target: _status(target)}

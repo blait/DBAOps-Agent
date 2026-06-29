@@ -109,8 +109,19 @@ def _save(cfg: dict) -> None:
     os.replace(tmp, CONNECTIONS_PATH)
 
 
-def _health(target: str | None = None) -> dict:
-    url = ROUTER_HEALTH_URL + (f"?tool={target}" if target else "")
+def _health(target: str | None = None, verify: bool = False) -> dict:
+    """라우터 healthz 조회.
+
+    verify=False: stdio 세션이 떴는지(tools/list)만 — 빠름. 상단 '연결 상태 확인'용.
+    verify=True : DB/Prometheus 는 실제 probe 쿼리로 진짜 연결을 확인 — '연결 테스트' 버튼용.
+                  (MCP 서버는 DB 없이도 tools/list 가 되므로 verify 없이는 오설정을 못 잡음)
+    """
+    params = []
+    if target:
+        params.append(f"tool={target}")
+    if verify:
+        params.append("verify=1")
+    url = ROUTER_HEALTH_URL + ("?" + "&".join(params) if params else "")
     try:
         with urllib.request.urlopen(url, timeout=50) as resp:
             return json.loads(resp.read()).get("targets", {})
@@ -411,11 +422,13 @@ def _render_tool_card(target: str, cfg: dict, disc: dict, secrets: list[str],
         if st.button("🔌 연결 테스트", key=f"test__{target}"):
             cfg["tools"][target] = conf
             _save(cfg)
-            res = _health(target)
+            with st.spinner("실제 연결 확인 중…"):
+                res = _health(target, verify=True)  # 실제 probe 쿼리로 진짜 접속 확인
             st.session_state["_mcp_health"] = {**health, **(res if isinstance(res, dict) else {})}
             one = res.get(target, {}) if isinstance(res, dict) else {}
             if one.get("ok"):
-                st.success(f"✅ 연결 성공 — {one.get('tools', 0)} tools")
+                tail = " · 실접속 확인" if one.get("verified") else ""
+                st.success(f"✅ 연결 성공 — {one.get('tools', 0)} tools{tail}")
             else:
                 st.error(f"❌ {one.get('error', res.get('_error', 'unknown'))}")
 
@@ -541,5 +554,6 @@ def render() -> None:
     if s2.button("🔌 전체 연결 테스트", use_container_width=True):
         cfg["tools"] = new_tools
         _save(cfg)
-        st.session_state["_mcp_health"] = _health()
+        with st.spinner("모든 도구 실제 연결 확인 중…"):
+            st.session_state["_mcp_health"] = _health(verify=True)  # 실제 probe 포함
         st.rerun()
