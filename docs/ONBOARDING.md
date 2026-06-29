@@ -93,11 +93,30 @@ nano .env
 
 | 키 | 설명 | 필수 |
 |---|---|---|
-| `AWS_REGION` | EC2/Bedrock 리전 (예: `ap-northeast-2`) | O |
-| `BEDROCK_MODEL_ID` | 기본값 그대로 OK | — |
-| `SLACK_BOT_TOKEN` | Slack 쓸 때 (`xoxb-...`) | Slack 시 |
-| `SLACK_APP_TOKEN` | Slack 쓸 때 (`xapp-...`) | Slack 시 |
-| `STREAMLIT_URL` | 차트 링크용 (예: `http://<ec2-ip>:8501`) | 선택 |
+| `AWS_REGION` | EC2/Bedrock 리전 (예: `ap-northeast-2`) | ✅ 필수 |
+| `BEDROCK_MODEL_ID` | 에이전트가 쓸 모델. 기본값 있어 생략 가능 | 기본값 사용 |
+| `SLACK_BOT_TOKEN` | Slack 봇 토큰 (`xoxb-...`) | Slack 쓸 때만 |
+| `SLACK_APP_TOKEN` | Slack Socket Mode 토큰 (`xapp-...`) | Slack 쓸 때만 |
+| `STREAMLIT_URL` | Slack 답변의 "차트 전체 보기" 링크용 (예: `http://<ec2-ip>:8501`) | 선택 |
+
+**작성 예시 (`.env`)** — 최소 구성은 `AWS_REGION` 한 줄이면 된다. Slack 봇까지 쓰면 토큰 2줄 추가:
+
+```bash
+# ── 최소 구성 (Streamlit 웹 UI 만 쓸 때) ───────────────
+AWS_REGION=ap-northeast-2
+
+# ── Slack 봇도 쓸 때 (위에 더해 아래 2줄 추가) ─────────
+SLACK_BOT_TOKEN=xoxb-1234567890-abcdefg...        # Slack 앱에서 발급 (§6)
+SLACK_APP_TOKEN=xapp-1-A0XXXX-1234567890-abcd...  # Slack 앱에서 발급 (§6)
+
+# ── 선택 (없어도 동작) ─────────────────────────────────
+# BEDROCK_MODEL_ID=global.anthropic.claude-opus-4-7   # 다른 모델 쓸 때만
+# STREAMLIT_URL=http://3.39.0.43:8501                 # Slack 차트 링크에 EC2 공인 IP
+```
+
+> `<ec2-ip>` 는 이 EC2 의 **공인 IP**(또는 사내 접근 도메인). `STREAMLIT_URL` 을 비워두면
+> Slack 답변에 차트 링크만 빠질 뿐, 분석/차트 첨부 자체는 정상 동작한다.
+> 토큰 발급 절차는 **§6 Slack 봇 연결**에 단계별로 있다.
 
 ### 4-3. 기동
 
@@ -147,6 +166,12 @@ docker compose up -d --build mcp-router agent streamlit
 ```
 
 각 도구는 카드(expander)로 펼쳐지고, 상단에 `🟢 9 tools` 같은 **실시간 연결 배지**가 붙는다.
+
+![MCP 연결설정 화면 — 상태 대시보드 / 전역 설정 / PostgreSQL 카드 입력 흐름](images/connection-settings.png)
+
+> 실제 화면. 상단에 활성 도구·탐색된 DB·리전 대시보드, 그 아래 전역 설정(Region/Model),
+> **데이터베이스 분석** 카드를 펼치면 ①RDS 선택 → ②Host/Port → ③Database → ④인증 방식
+> → ⑤SSL mode 순서로 입력하고 맨 아래 **연결 테스트**로 실접속을 확인한다.
 
 ### 5-3. DB 연결 입력 흐름 (PostgreSQL / MySQL)
 
