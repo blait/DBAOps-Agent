@@ -106,8 +106,8 @@ nano .env
 AWS_REGION=ap-northeast-2
 
 # ── Slack 봇도 쓸 때 (위에 더해 아래 2줄 추가) ─────────
-SLACK_BOT_TOKEN=xoxb-1234567890-abcdefg...        # Slack 앱에서 발급 (§6)
-SLACK_APP_TOKEN=xapp-1-A0XXXX-1234567890-abcd...  # Slack 앱에서 발급 (§6)
+SLACK_BOT_TOKEN=<xoxb-로 시작하는 봇 토큰>      # Slack 앱에서 발급 (§6)
+SLACK_APP_TOKEN=<xapp-로 시작하는 앱 토큰>      # Slack 앱에서 발급 (§6)
 
 # ── 선택 (없어도 동작) ─────────────────────────────────
 # BEDROCK_MODEL_ID=global.anthropic.claude-opus-4-7   # 다른 모델 쓸 때만
