@@ -66,35 +66,75 @@ docker compose version
 ## 2. 코드 가져오기 + 설정
 
 ```bash
-git clone <this-repo> dbaops && cd dbaops/deploy/ec2-allinone
+git clone https://github.com/blait/DBAOps-Agent.git dbaops
+cd dbaops/deploy/ec2-allinone        # ← 이후 모든 docker compose 명령은 이 디렉토리 안에서 실행
 
 cp .env.example .env
-# .env 편집: AWS_REGION, BEDROCK_MODEL_ID, (선택) SLACK_*, STREAMLIT_URL
-
-# 연결설정 초기값 (이후 UI 에서 편집 가능)
-docker volume create ec2-allinone_dbaops-data 2>/dev/null || true
-# connections.json 은 첫 기동 후 UI 연결설정 탭에서 채워도 됨.
+nano .env        # 편집기로 .env 를 연다 (vi 써도 됨)
 ```
+
+`.env` 에서 채울 값 (최소 AWS_REGION 만 맞으면 동작):
+
+| 키 | 설명 | 필수 |
+|---|---|---|
+| `AWS_REGION` | EC2/Bedrock 리전 (예: `ap-northeast-2`) | ✅ |
+| `BEDROCK_MODEL_ID` | 기본값 그대로 두면 됨 | — |
+| `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` | Slack 쓸 때만 (§6 참조) | Slack 시 |
+| `STREAMLIT_URL` | Slack 메시지의 차트 링크용 (예: `http://<ec2-ip>:8501`) | 선택 |
+
+> `connections.json`(DB·Prometheus 연결정보)은 **지금 안 만들어도 된다.** 첫 기동 후
+> Streamlit 의 🔌 연결설정 탭에서 입력하면 자동 생성된다(§4). 볼륨에 저장돼 재시작해도 유지.
 
 ---
 
-## 3. 기동
+## 3. 기동 (docker compose 가 처음이라면 이 섹션부터)
+
+### 3-0. docker compose 가 뭘 하나 (개념)
+
+`docker-compose.yml` 파일 한 장에 **4개 서비스**(mcp-router / agent / streamlit / slack-bot)가
+정의돼 있다. `docker compose` 명령은 이 파일을 읽어서 4개를 **한 번에** 빌드·실행·중지한다.
+하나하나 `docker run` 할 필요 없이 묶음으로 관리하는 도구라고 보면 된다.
+
+- **이미지(image)**: 코드 + 파이썬 + 라이브러리를 통째로 구운 "실행 가능한 스냅샷". `--build` 가 이걸 만든다.
+- **컨테이너(container)**: 그 이미지를 실제로 띄운 "실행 중인 프로세스". `up` 이 이걸 띄운다.
+- 4개 컨테이너는 자기들끼리 내부 네트워크로 통신한다(`agent` → `mcp-router` 등). 우리가 포트를 신경 쓸 건 Streamlit `8501` 하나뿐.
+
+### 3-1. 빌드 + 실행 (한 줄)
 
 ```bash
-# Slack 토큰을 .env 에 넣었다면:
+# deploy/ec2-allinone 디렉토리 안에서 실행
 docker compose up -d --build
-
-# Slack 없이 먼저 테스트하려면 slack-bot 제외:
-docker compose up -d --build mcp-router agent streamlit
 ```
 
-상태 확인:
+이 한 줄이 순서대로 하는 일:
+1. `--build` → 4개 서비스의 **이미지를 빌드**(코드 복사 + 의존성 설치). 처음엔 수 분 걸린다(이후엔 캐시되어 빠름).
+2. `up` → 빌드된 이미지로 **4개 컨테이너를 기동**.
+3. `-d` → **백그라운드(detached)** 로 실행. 터미널을 닫아도 계속 돈다. (`-d` 빼면 로그가 화면에 흐르고, Ctrl+C 누르면 멈춘다.)
+
+> **Slack 없이 먼저 테스트**하려면 slack-bot 만 빼고 3개만 띄운다:
+> ```bash
+> docker compose up -d --build mcp-router agent streamlit
+> ```
+> Slack 토큰은 나중에 `.env` 에 넣고 `docker compose up -d --build slack-bot` 로 추가하면 된다.
+
+### 3-2. 정상 기동 확인
 
 ```bash
 docker compose ps
-curl -s localhost:9000/healthz | python3 -m json.tool      # 라우터(컨테이너 내부 네트워크라 호스트에선 안 보일 수 있음)
-docker compose logs -f agent
 ```
+4개(또는 3개) 서비스가 모두 **`Up` / `running`** 으로 보이면 성공. `Exit` / `Restarting` 이면 문제 → 그 서비스 로그를 본다:
+
+```bash
+docker compose logs -f agent        # agent 로그를 실시간(-f)으로 (Ctrl+C 로 빠져나옴)
+docker compose logs --tail=50 mcp-router   # 최근 50줄만
+```
+
+기대되는 정상 로그 예:
+- `agent` → `serving on 0.0.0.0:8080`
+- `slack-bot` → `Bolt app is running!`
+- `streamlit` → `You can now view your Streamlit app`
+
+이제 브라우저로 `http://<ec2-ip>:8501` 접속이 되면 다음(연결 설정) 단계로.
 
 ---
 
@@ -119,8 +159,9 @@ docker compose logs -f agent
 
 ## 5. 사용
 
-- **Streamlit**: OS·인프라 / DB 성능 / 로그 / 단일 RCA 탭에서 자연어 질문
-- **Slack**: 채널에 봇 초대 후 `@DBAOps 최근 1시간 CPU peak 분석` → 모드 버튼 선택 → 스레드에 결과
+- **Streamlit**: OS·인프라 / DB 성능 / 로그 / 단일 RCA 탭에서 자연어 질문 (검증 포함 정식 리포트)
+- **Slack**: 채널에 봇 초대 후 `@DBAOps 최근 1시간 Aurora CPU 어때?` → 스레드에 바로 답.
+  같은 스레드 안에서는 멘션 없이 이어 물어도 맥락을 기억하며 대화가 계속된다.
 
 ---
 
@@ -130,21 +171,38 @@ docker compose logs -f agent
 앱 매니페스트로 한 번에 설정하는 **상세 단계별 가이드는 [`SLACK_SETUP.md`](SLACK_SETUP.md)** 참조.
 
 요약:
-1. api.slack.com/apps → From a manifest (SLACK_SETUP.md 의 YAML)
+1. api.slack.com/apps → From a manifest (SLACK_SETUP.md 의 YAML — `message.*` 이벤트 포함)
 2. App Token(`xapp-...`) + Bot Token(`xoxb-...`) 발급
 3. `.env` 에 두 토큰 입력 → `docker compose up -d --build slack-bot`
-4. 대상 채널에서 `/invite @DBAOps` → `@DBAOps 질문` → 도메인 버튼 선택
+4. 대상 채널에서 `/invite @DBAOps` → `@DBAOps 질문` → 스레드에서 멘션 없이 이어 대화
 
 ---
 
-## 7. 갱신 / 종료
+## 7. 자주 쓰는 운영 명령 (deploy/ec2-allinone 안에서)
 
 ```bash
-git pull && docker compose up -d --build      # 코드 갱신 후 재빌드
-docker compose restart mcp-router             # 라우터만 재시작
-docker compose down                           # 종료(볼륨 보존)
-docker compose down -v                        # 볼륨까지 삭제(연결설정 초기화)
+# 코드 갱신 후 전체 재빌드·재기동
+git pull && docker compose up -d --build
+
+# 특정 서비스 하나만 재빌드 (예: slack-bot 만 수정했을 때 — 빠름)
+docker compose up -d --build slack-bot
+
+# 한 서비스만 재시작 (코드 변경 없이, 예: 설정만 다시 읽기)
+docker compose restart mcp-router
+
+# 전체 종료 — 컨테이너만 내림. 데이터(연결설정)는 볼륨에 보존됨
+docker compose down
+
+# 전체 종료 + 볼륨 삭제 — 연결설정까지 초기화(처음 상태로)
+docker compose down -v
+
+# 실시간 로그 보기 (문제 진단 1순위)
+docker compose logs -f            # 4개 전체
+docker compose logs -f agent      # 특정 서비스만
 ```
+
+> 용어: `down`(=컨테이너 제거, 데이터 유지) vs `down -v`(=볼륨까지 삭제, 연결설정 날아감).
+> 평소엔 `down` 만 쓰고, 완전 초기화할 때만 `-v` 를 붙인다.
 
 ---
 
