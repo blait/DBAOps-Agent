@@ -97,7 +97,7 @@ def _extract_timeseries_from_obj(obj: Any) -> dict[str, list[tuple[Any, Any]]]:
 
     series = obj.get("series")
     if isinstance(series, list) and series and isinstance(series[0], dict) and "ts" in series[0]:
-        label = obj.get("metric_name") or obj.get("label") or "series"
+        label = obj.get("metric_name") or obj.get("metric") or obj.get("label") or "series"
         out[str(label)] = [(p.get("ts"), p.get("value")) for p in series]
         return out
 
