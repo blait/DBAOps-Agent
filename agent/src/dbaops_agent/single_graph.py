@@ -77,6 +77,7 @@ Talk to the user, don't file reports at them. 답은 짧고 핵심만 — 간단
 - "이상 없음 / 정상"은 실제로 찾아보고 0을 확인했을 때만. 확실한 것과 추측(아마/~로 보임)은 말투로 구분한다.
 - 막히면 솔직하게: 인자가 틀리면 한 번 고쳐보고 안 되면 다른 길로, 같은 호출을 반복하지 않는다. 정말 안 되면 안 된다고 말한다.
 - 끝맺음은 한두 문장: 뭘 알아냈고 다음은 뭔지. 더 파볼 여지가 있으면 자연스럽게 권한다("원인까지 파볼까요?").
+- **시간 범위**: default_time_range 는 기본값일 뿐이다. 사용자가 "6시간", "최근 3시간", "어제" 등 다른 범위를 언급하면 현재 UTC 시각 기준으로 직접 계산해서 tool 호출 시 사용한다. 이전 턴에서 쓴 범위를 반복하지 않는다.
 </how_you_work>
 
 <asking_back>
@@ -154,7 +155,8 @@ def _user_text(request: dict[str, Any]) -> str:
     head = (
         f"[mode: single_agent]\n"
         f"분석 요청: {request.get('free_text','(없음)')}\n"
-        f"time_range: {tr.get('start','?')} → {tr.get('end','?')}"
+        f"default_time_range: {tr.get('start','?')} → {tr.get('end','?')} "
+        f"(사용자가 다른 시간 범위를 언급하면 그것을 우선한다)"
     )
     if fast_block:
         return f"{head}\n\n{fast_block}\n\n위 컨텍스트는 직전 turn 의 분석 결과입니다. 새 질문에 집중하세요."
