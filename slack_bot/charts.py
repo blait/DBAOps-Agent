@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 from datetime import datetime
 from typing import Any
 
@@ -373,6 +374,20 @@ def _spec_fits(spec: dict, chart_type: str, obj: Any) -> bool:
     return False
 
 
+def _metric_filter_matches(spec: dict, obj: Any) -> bool:
+    """spec 의 metric_filter/title 키워드가 obj 의 metric 이름에 포함되는지."""
+    keywords = list(spec.get("metric_filter") or [])
+    title = spec.get("title") or ""
+    if not keywords and title:
+        keywords = [w for w in re.split(r"[\s/·\-_()（）]", title)
+                    if len(w) > 2 and w.isascii()]
+    if not keywords:
+        return True
+    sd = _extract_timeseries_from_obj(obj) if isinstance(obj, dict) else {}
+    all_labels = " ".join(sd.keys()).lower() if sd else ""
+    return any(k.lower() in all_labels for k in keywords)
+
+
 def render_chart_png(spec: dict, tool_results: dict[str, Any]) -> bytes | None:
     """chart spec → PNG bytes. 데이터 없거나 table 이면 None.
 
@@ -380,6 +395,7 @@ def render_chart_png(spec: dict, tool_results: dict[str, Any]) -> bytes | None:
 
     source_tool_call_id 정확 매칭을 우선하되, single 모드처럼 에이전트가 id 를
     지어내 매칭 실패하면 chart_type 에 맞는 데이터를 가진 tool 결과로 폴백한다.
+    폴백 시 metric_filter/title 키워드 매칭 + 최근(마지막) 결과를 우선한다.
     """
     chart_type = (spec.get("chart_type") or "line").lower()
     renderer = _RENDERERS.get(chart_type)
@@ -389,12 +405,23 @@ def render_chart_png(spec: dict, tool_results: dict[str, Any]) -> bytes | None:
     obj = tool_results.get(spec.get("source_tool_call_id"))
     candidates: list[Any] = []
     if obj is not None and _spec_fits(spec, chart_type, obj):
-        candidates.append(obj)          # 1) 정확 매칭 + 데이터 적합
-    for o in tool_results.values():     # 2) 폴백 — 적합한 데이터를 가진 다른 결과
-        if o is not obj and _spec_fits(spec, chart_type, o):
-            candidates.append(o)
+        candidates.append(obj)
+
+    # 폴백: 최근 결과 우선(reversed) + metric_filter 매칭을 상위로
+    fallback_matched: list[Any] = []
+    fallback_unmatched: list[Any] = []
+    for o in reversed(list(tool_results.values())):
+        if o is obj or not _spec_fits(spec, chart_type, o):
+            continue
+        if _metric_filter_matches(spec, o):
+            fallback_matched.append(o)
+        else:
+            fallback_unmatched.append(o)
+    candidates.extend(fallback_matched)
+    candidates.extend(fallback_unmatched)
+
     if obj is not None and obj not in candidates:
-        candidates.append(obj)          # 3) 최후 — 정확 매칭이지만 _spec_fits 판정 실패한 경우도 시도
+        candidates.append(obj)
 
     for cand in candidates:
         if cand is None:

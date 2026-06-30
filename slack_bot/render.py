@@ -241,6 +241,7 @@ class SlackThreadRenderer:
         self._reported = False          # report 이벤트로 본문을 이미 게시했는지
         self._last_ai_text = ""         # single 모드: 마지막 ai 본문(최종 답변 후보)
         self._tool_results: dict[str, object] = {}  # tool_call_id → parsed obj (차트 데이터)
+        self._tcid_to_name: dict[str, str] = {}     # tool_call_id → tool name 매핑
 
     def _update_status(self, text: str) -> None:
         try:
@@ -367,8 +368,11 @@ class SlackThreadRenderer:
                         pass
             elif role == "ai":
                 tcs = msg.get("tool_calls") or []
-                for _ in tcs:
+                for tc in tcs:
                     self._tool_calls += 1
+                    tcid = tc.get("id")
+                    if tcid:
+                        self._tcid_to_name[tcid] = tc.get("name", "")
                 text = (msg.get("text") or "").strip()
                 if tcs:
                     # 도구 호출 직전 예고 문장(preamble)이 있으면 그걸 진행상황으로 보여준다
