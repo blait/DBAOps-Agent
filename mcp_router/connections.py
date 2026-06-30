@@ -273,10 +273,11 @@ def stdio_spec(target: str, conf: dict, region: str) -> dict[str, Any] | None:
         }
 
     if target == "awslabs-aws-api":
-        os.makedirs("/tmp/aws-api-mcp", exist_ok=True)
+        os.makedirs("/tmp/.aws/aws-api-mcp", exist_ok=True)
         env = dict(base_aws)
+        env["HOME"] = "/tmp"
         env["READ_OPERATIONS_ONLY"] = "true"
-        env["AWS_API_MCP_WORKING_DIR"] = "/tmp/aws-api-mcp"
+        env["AWS_API_MCP_WORKING_DIR"] = "/tmp/.aws/aws-api-mcp"
         env["AWS_API_MCP_TELEMETRY"] = "false"
         return {
             "command": sys.executable,
