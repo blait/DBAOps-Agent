@@ -130,6 +130,19 @@ services:
       - "9104"
     restart: unless-stopped
 
+  # EC2 호스트(이 박스) CPU/메모리/디스크 — node_* 메트릭
+  node-exporter:
+    image: quay.io/prometheus/node-exporter:v1.8.2
+    profiles: ["prometheus"]
+    pid: host                       # 호스트 프로세스/CPU 통계 접근
+    command:
+      - "--path.rootfs=/host"
+    volumes:
+      - /:/host:ro,rslave           # 호스트 파일시스템 read-only 마운트
+    expose:
+      - "9100"
+    restart: unless-stopped
+
 volumes:
   dbaops-data:
   prometheus-data:

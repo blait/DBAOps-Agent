@@ -35,3 +35,11 @@ scrape_configs:
         labels:
           instance: dbaops-poc-mysql
           engine: mysql
+
+  # EC2 호스트(올인원 박스) — node_cpu/node_memory 등 OS 지표
+  - job_name: ec2-host
+    static_configs:
+      - targets: ["node-exporter:9100"]
+        labels:
+          instance: dbaops-seoul-allinone
+          role: host
