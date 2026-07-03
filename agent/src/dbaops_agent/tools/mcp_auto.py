@@ -74,8 +74,71 @@ def _make_args_model(name: str, schema: dict) -> type[BaseModel]:
     return create_model(f"{name}Args", **fields)
 
 
+def _shrink_timeseries(obj: Any, max_chars: int) -> str | None:
+    """시계열 응답이면 문자열 자르기 대신 포인트 수를 줄여 '유효한 JSON'을 유지.
+
+    문자열 중간을 자르면 downstream(차트 렌더러)이 json.loads 에 실패해
+    차트 데이터로 못 쓴다. 시계열은 구조를 보존한 채 다운샘플링한다.
+    """
+    if not isinstance(obj, dict):
+        return None
+
+    def _dump(o: Any) -> str:
+        return json.dumps(o, ensure_ascii=False, default=str)
+
+    # 지원 형태: {series:[{ts,value}]} / prometheus {data.result[].values} 또는 {result[].values}
+    #           / awslabs {metricDataResults[].datapoints}
+    for _ in range(6):  # 절반씩 최대 6회 축소 시도
+        s = _dump(obj)
+        if len(s) <= max_chars:
+            return s
+        shrunk = False
+
+        series = obj.get("series")
+        if isinstance(series, list) and len(series) > 20:
+            obj = {**obj, "series": series[::2],
+                   "_downsampled": f"kept {len(series[::2])}/{len(series)} points"}
+            shrunk = True
+
+        result = obj.get("result")
+        if result is None and isinstance(obj.get("data"), dict):
+            result = obj["data"].get("result")
+        if isinstance(result, list):
+            new_result = []
+            for item in result:
+                vals = item.get("values") if isinstance(item, dict) else None
+                if isinstance(vals, list) and len(vals) > 20:
+                    item = {**item, "values": vals[::2]}
+                    shrunk = True
+                new_result.append(item)
+            if shrunk:
+                if isinstance(obj.get("data"), dict):
+                    obj = {**obj, "data": {**obj["data"], "result": new_result}}
+                else:
+                    obj = {**obj, "result": new_result}
+
+        mdr = obj.get("metricDataResults")
+        if isinstance(mdr, list):
+            new_mdr = []
+            for m in mdr:
+                dps = m.get("datapoints") if isinstance(m, dict) else None
+                if isinstance(dps, list) and len(dps) > 20:
+                    m = {**m, "datapoints": dps[::2]}
+                    shrunk = True
+                new_mdr.append(m)
+            if shrunk:
+                obj = {**obj, "metricDataResults": new_mdr}
+
+        if not shrunk:
+            return None  # 시계열이 아니거나 더 줄일 수 없음 → 일반 truncate 로
+    return None
+
+
 def _truncate(obj: Any, max_chars: int = 12000) -> str:
-    """LLM 컨텍스트 보호용 응답 직렬화."""
+    """LLM 컨텍스트 보호용 응답 직렬화. 시계열은 JSON 구조 보존 다운샘플링 우선."""
+    shrunk = _shrink_timeseries(obj, max_chars)
+    if shrunk is not None:
+        return shrunk
     try:
         s = json.dumps(obj, ensure_ascii=False, default=str)
     except Exception:  # noqa: BLE001
