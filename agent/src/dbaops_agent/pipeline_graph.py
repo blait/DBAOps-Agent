@@ -406,10 +406,12 @@ def normalize_message(m: Any) -> dict:
     tcs = []
     for tc in (getattr(m, "tool_calls", None) or []):
         tcs.append({"id": tc.get("id"), "name": tc.get("name"), "args": tc.get("args")})
+    # 13000: tool 응답은 mcp_auto 가 12000자 내 '유효한 JSON'으로 이미 줄여놓음.
+    # 여기서 그보다 작게 자르면 JSON 이 깨져 UI/Slack 차트 렌더가 실패한다.
     out = {
         "role":       role,
         "name":       name,
-        "text":       (text or "")[:8000],
+        "text":       (text or "")[:13000],
         "tool_calls": tcs,
     }
     tcid = getattr(m, "tool_call_id", None)
