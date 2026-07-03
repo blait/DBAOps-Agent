@@ -130,6 +130,8 @@ Prometheus 본체·exporter 구성 값(스크레이프 대상, 자격증명 처�
 | 증상 | 확인 |
 |---|---|
 | `install.sh` 에서 python3.12 없음 | AL2 (2023 아님) 이거나 오래된 Ubuntu — OS 업그레이드 필요 |
+| pip 설치 중 `drain3 requires cachetools==4.2.1` 경고 | 무해 — 서비스 동작에 영향 없음 (실검증 완료) |
+| streamlit `Port 8501 is not available` | 8501 을 다른 프로세스(docker 등)가 점유 — `ss -ltnp \| grep 8501` 로 확인 후 정리 |
 | mcp-router 기동 실패 | `journalctl -u dbaops-mcp-router -n 50` — 대부분 pip 의존성/PATH 문제 |
 | 연결 테스트에서 MySQL 실패 | `node --version` 20+ 확인, `/opt/dbaops/mysql-mcp/node_modules` 존재 확인 |
 | Slack 차트 한글 깨짐 | `fc-list \| grep -i noto` 로 CJK 폰트 확인 (install.sh 가 설치함) |
