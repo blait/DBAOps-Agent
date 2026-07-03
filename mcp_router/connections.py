@@ -210,9 +210,13 @@ def stdio_spec(target: str, conf: dict, region: str) -> dict[str, Any] | None:
             logger.warning("community-postgres: credentials missing")
             return None
         url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}?sslmode={sslmode}"
+        # unrestricted 는 EXPLAIN/튜닝 도구가 열림 — read-only DB 유저와 함께 쓸 것.
+        access_mode = conf.get("PG_ACCESS_MODE", "restricted")
+        if access_mode not in ("restricted", "unrestricted"):
+            access_mode = "restricted"
         return {
             "command": "postgres-mcp",
-            "args": ["--access-mode", "restricted", "--transport", "stdio", url],
+            "args": ["--access-mode", access_mode, "--transport", "stdio", url],
             "env": {
                 "FASTMCP_LOG_LEVEL": base_aws["FASTMCP_LOG_LEVEL"],
                 "PATH": os.environ.get("PATH", ""),

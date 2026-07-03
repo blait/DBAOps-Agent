@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any
 
 import boto3
@@ -208,6 +209,87 @@ def download_db_log_file_portion(args: dict) -> dict:
     }, max_chars=14000)
 
 
+def describe_rds_events(args: dict) -> dict:
+    """RDS 이벤트 이력 — failover, 재시작, 파라미터 변경, 스토리지, 백업 등.
+
+    args: {"source_identifier": str?, "source_type": str?, "duration_minutes": int?,
+           "categories": [str]?}
+
+    RCA 의 "그 시점에 뭐가 바뀌었나"를 답하는 도구. source 를 안 주면
+    계정 전체(리전 내) 이벤트를 시간 역순으로 반환.
+    """
+    rds = _client("rds")
+    kwargs: dict[str, Any] = {
+        # AWS 최대 14일(20160분). 기본 24시간.
+        "Duration": max(5, min(20160, int(args.get("duration_minutes", 1440)))),
+        "MaxRecords": 100,
+    }
+    if args.get("source_identifier"):
+        kwargs["SourceIdentifier"] = args["source_identifier"]
+        # SourceIdentifier 를 주면 SourceType 필수 — 기본 db-instance
+        kwargs["SourceType"] = args.get("source_type") or "db-instance"
+    elif args.get("source_type"):
+        kwargs["SourceType"] = args["source_type"]
+    if args.get("categories"):
+        kwargs["EventCategories"] = list(args["categories"])
+
+    events: list[dict] = []
+    while True:
+        resp = rds.describe_events(**kwargs)
+        for e in resp.get("Events", []):
+            events.append({
+                "date":       e.get("Date"),
+                "source_id":  e.get("SourceIdentifier"),
+                "source_type": e.get("SourceType"),
+                "categories": e.get("EventCategories"),
+                "message":    e.get("Message"),
+            })
+        marker = resp.get("Marker")
+        if not marker or len(events) >= 300:
+            break
+        kwargs["Marker"] = marker
+
+    events.sort(key=lambda x: str(x.get("date") or ""), reverse=True)
+    return _truncate({
+        "events": events,
+        "count": len(events),
+        "window_minutes": kwargs["Duration"],
+    })
+
+
+def describe_db_recommendations(args: dict) -> dict:
+    """RDS 권장사항 — AWS 가 자동 분석한 rightsizing/설정/버전 권고.
+
+    args: {"status": str?, "severity": str?, "max": int?}
+    status: active|pending|resolved|dismissed (기본 active)
+    """
+    rds = _client("rds")
+    filters = []
+    status = args.get("status") or "active"
+    if status != "all":
+        filters.append({"Name": "status", "Values": [status]})
+    if args.get("severity"):
+        filters.append({"Name": "severity", "Values": [args["severity"]]})
+    kwargs: dict[str, Any] = {"MaxRecords": max(20, min(100, int(args.get("max", 50))))}
+    if filters:
+        kwargs["Filters"] = filters
+    resp = rds.describe_db_recommendations(**kwargs)
+    items = []
+    for r in resp.get("DBRecommendations", []):
+        items.append({
+            "id":          r.get("RecommendationId"),
+            "severity":    r.get("Severity"),
+            "status":      r.get("Status"),
+            "created":     r.get("CreatedTime"),
+            "resource_arn": r.get("ResourceArn"),
+            "category":    r.get("Category"),
+            "detection":   r.get("Detection"),
+            "recommendation": r.get("Recommendation"),
+            "description": (r.get("Description") or "")[:500],
+        })
+    return _truncate({"recommendations": items, "count": len(items), "status_filter": status})
+
+
 def list_msk_clusters(args: dict) -> dict:
     """MSK cluster 목록 (Serverless 포함)."""
     out: list[dict] = []
@@ -331,6 +413,110 @@ def _parse_ts(s: Any) -> datetime | None:
     return None
 
 
+@lru_cache(maxsize=64)
+def _dbi_resource_id(identifier: str) -> str:
+    """DBInstanceIdentifier → DbiResourceId (db-XXXX). 이미 db- prefix 면 그대로."""
+    if not identifier or identifier.startswith("db-"):
+        return identifier
+    try:
+        resp = _client("rds").describe_db_instances(DBInstanceIdentifier=identifier)
+        instances = resp.get("DBInstances") or []
+        if instances and instances[0].get("DbiResourceId"):
+            return instances[0]["DbiResourceId"]
+    except Exception as e:  # noqa: BLE001
+        logger.warning("dbi resolve failed for %s: %s", identifier, e)
+    return identifier
+
+
+def pi_create_analysis_report(args: dict) -> dict:
+    """PI 분석 리포트 생성 — AWS 가 해당 구간의 성능을 자동 분석(인사이트 포함).
+
+    args: {"db_id": str, "start": str, "end": str}
+    생성엔 수 분 걸림 → 60초까지 폴링, 안 끝나면 report_id 반환(나중에 get 으로 조회).
+    """
+    import time as _time
+
+    pi = _client("pi")
+    rid = _dbi_resource_id(args["db_id"])
+    start, end = _parse_ts(args["start"]), _parse_ts(args["end"])
+    resp = pi.create_performance_analysis_report(
+        ServiceType="RDS", Identifier=rid,
+        StartTime=start, EndTime=end,
+    )
+    report_id = resp["AnalysisReportId"]
+    # 짧은 폴링 — 빨리 끝나는 경우 바로 결과까지
+    for _ in range(12):
+        _time.sleep(5)
+        rep = pi.get_performance_analysis_report(
+            ServiceType="RDS", Identifier=rid,
+            AnalysisReportId=report_id, TextFormat="PLAIN_TEXT",
+        ).get("AnalysisReport") or {}
+        status = rep.get("Status")
+        if status in ("SUCCEEDED", "FAILED"):
+            return _truncate(_format_pi_report(rep, rid))
+    return {
+        "report_id": report_id,
+        "dbi_resource_id": rid,
+        "status": "RUNNING",
+        "hint": "생성 중 — 1~2분 뒤 pi_get_analysis_report 로 report_id 를 조회하라.",
+    }
+
+
+def pi_get_analysis_report(args: dict) -> dict:
+    """PI 분석 리포트 조회. report_id 없으면 최근 리포트 목록 반환.
+
+    args: {"db_id": str, "report_id": str?}
+    """
+    pi = _client("pi")
+    rid = _dbi_resource_id(args["db_id"])
+    if not args.get("report_id"):
+        resp = pi.list_performance_analysis_reports(
+            ServiceType="RDS", Identifier=rid, ListTags=False,
+        )
+        return _truncate({
+            "dbi_resource_id": rid,
+            "reports": [
+                {"report_id": r.get("AnalysisReportId"), "status": r.get("Status"),
+                 "start": r.get("StartTime"), "end": r.get("EndTime"),
+                 "created": r.get("CreateTime")}
+                for r in resp.get("AnalysisReports") or []
+            ],
+        })
+    rep = pi.get_performance_analysis_report(
+        ServiceType="RDS", Identifier=rid,
+        AnalysisReportId=args["report_id"], TextFormat="PLAIN_TEXT",
+    ).get("AnalysisReport") or {}
+    return _truncate(_format_pi_report(rep, rid))
+
+
+def _format_pi_report(rep: dict, rid: str) -> dict:
+    """PI AnalysisReport → 요약 구조 (insight 트리를 평탄화)."""
+    def _walk(insights: list, depth: int = 0) -> list[dict]:
+        out = []
+        for ins in insights or []:
+            out.append({
+                "depth": depth,
+                "type": ins.get("InsightType"),
+                "description": (ins.get("Description") or "")[:600],
+                "severity": ins.get("Severity"),
+                "recommendations": [
+                    (r.get("RecommendationDescription") or "")[:400]
+                    for r in ins.get("Recommendations") or []
+                ],
+            })
+            out.extend(_walk(ins.get("SupportingInsights"), depth + 1))
+        return out
+
+    return {
+        "report_id": rep.get("AnalysisReportId"),
+        "dbi_resource_id": rid,
+        "status": rep.get("Status"),
+        "start": rep.get("StartTime"),
+        "end": rep.get("EndTime"),
+        "insights": _walk(rep.get("Insights")),
+    }
+
+
 # ─────────────────────── dispatch ───────────────────────
 
 
@@ -339,9 +525,13 @@ _TOOLS = {
     "describe_rds_clusters":       describe_rds_clusters,
     "describe_db_log_files":       describe_db_log_files,
     "download_db_log_file_portion": download_db_log_file_portion,
+    "describe_rds_events":         describe_rds_events,
+    "describe_db_recommendations": describe_db_recommendations,
     "list_msk_clusters":           list_msk_clusters,
     "describe_ec2_instances":      describe_ec2_instances,
     "describe_pi_dimensions":      describe_pi_dimensions,
+    "pi_create_analysis_report":   pi_create_analysis_report,
+    "pi_get_analysis_report":      pi_get_analysis_report,
 }
 
 
