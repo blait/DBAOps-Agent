@@ -2,10 +2,12 @@
 
 LangGraph + AWS Bedrock + MCP 기반 DB·인프라 분석 에이전트. 자연어로 "최근 1시간 Aurora CPU 어때?" 라고 물으면 → AI 분석가가 도구를 직접 골라 호출 → 차트 포함 답변을 돌려준다.
 
-**배포 방식**: EC2 한 대 + docker compose (기본 4 서비스 + 선택 Prometheus 스택 4). AgentCore/Gateway/Lambda 없이 동작.
-인터페이스는 **Streamlit 웹 UI** + **Slack 봇** 두 가지.
+**배포 방식**: EC2 한 대 위에 두 가지 중 택 1 — ① docker compose(권장) 또는 ② 생 EC2(venv+systemd, docker 불가 환경).
+AgentCore/Gateway/Lambda 없이 동작. 인터페이스는 **Streamlit 웹 UI** + **Slack 봇** 두 가지.
 
-> **고객 환경에 처음 배포** → [`deploy/ec2-allinone/README.md`](deploy/ec2-allinone/README.md)
+> **고객 환경에 처음 배포 (docker)** → [`deploy/ec2-allinone/README.md`](deploy/ec2-allinone/README.md)
+>
+> **고객 환경에 처음 배포 (docker 없이, systemd)** → [`deploy/ec2-vanilla/README.md`](deploy/ec2-vanilla/README.md)
 >
 > **Slack 봇 연결** → [`deploy/ec2-allinone/SLACK_SETUP.md`](deploy/ec2-allinone/SLACK_SETUP.md)
 >
@@ -37,7 +39,8 @@ ui/streamlit/       Streamlit UI + MCP 연결설정 페이지
 mcp_router/         MCP 도구 라우터 (stdio proxy + 커스텀 4종)
 mcp_tools/          커스텀 MCP 도구 핸들러 (rds-pi / msk / s3-log / aws-api)
 slack_bot/          Slack 봇 (Socket Mode, 대화형)
-deploy/ec2-allinone/  docker-compose + 배포 가이드
+deploy/ec2-allinone/  배포 방법 ① docker-compose + 가이드
+deploy/ec2-vanilla/   배포 방법 ② 생 EC2 (venv+systemd, docker 없이)
 generators/         시나리오 부하 generator (PoC testbed 용)
 infra/              Terraform (PoC 전용 — testbed 인프라)
 docs/               가이드 문서

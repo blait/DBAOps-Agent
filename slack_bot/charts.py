@@ -35,7 +35,11 @@ def _setup_korean_font() -> None:
         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        # Amazon Linux 2023 (google-noto-sans-cjk-ttc-fonts) — vanilla EC2 배포
+        "/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc",
     ]
+    import glob as _glob
+    candidates += _glob.glob("/usr/share/fonts/**/NotoSansCJK*.ttc", recursive=True)
     for path in candidates:
         try:
             font_manager.fontManager.addfont(path)

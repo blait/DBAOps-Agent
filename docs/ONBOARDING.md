@@ -73,7 +73,21 @@ Bedrock 인라인 정책:
 
 ## 4. 배포 (15분)
 
-### 4-1. EC2 부트스트랩
+배포 방식은 **두 가지** — 환경에 맞는 쪽을 골라 진행한다. 기능은 완전히 동일하다
+(같은 코드, 같은 연결설정 UI, 같은 Slack 봇).
+
+| | 방법 A — docker compose (권장) | 방법 B — 생 EC2 (docker 없이) |
+|---|---|---|
+| 가이드 | **아래 §4-1 ~ §4-4 계속 진행** | **[`deploy/ec2-vanilla/README.md`](../deploy/ec2-vanilla/README.md)** 로 이동 |
+| 적합한 경우 | docker 사용 가능한 일반적인 환경 | 사내 정책상 docker 불가, 호스트 직접 구동 선호 |
+| 사전 요구 | docker + compose | 없음 (install.sh 가 OS 패키지 설치) |
+| 프로세스 관리 | compose restart 정책 | systemd (자동 재시작·부팅 기동) |
+| 격리 | 이미지가 python/node 버전 고정 | 호스트 OS 의존 (AL2023 / Ubuntu 22.04+) |
+
+> 방법 B 를 선택했다면 이 문서의 §4 나머지(docker 기준)는 건너뛰고,
+> vanilla 가이드의 설치를 마친 뒤 **§5 연결 설정**부터 다시 이 문서로 돌아오면 된다.
+
+### 4-1. EC2 부트스트랩 (방법 A — docker)
 
 Amazon Linux 2023 기준:
 ```bash

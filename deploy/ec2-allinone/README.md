@@ -1,7 +1,10 @@
-# DBAOps-Agent 올인원 EC2 배포
+# DBAOps-Agent 올인원 EC2 배포 (docker compose)
 
 AgentCore / Gateway / Cognito / Lambda **없이** EC2 한 대에서 전체 시스템을 구동한다.
 고객이 받은 권한이 AWS 관리형 `DatabaseAdministrator`(데이터 읽기) 한 장뿐인 환경을 위한 구성.
+
+> docker 를 쓸 수 없는 환경이라면 **[`../ec2-vanilla/README.md`](../ec2-vanilla/README.md)**
+> (venv + systemd 로 호스트에 직접 구동, 기능 동일)를 사용한다.
 
 ```
 EC2 (instance role: DatabaseAdministrator + bedrock:InvokeModel)
