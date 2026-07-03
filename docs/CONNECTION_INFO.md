@@ -20,6 +20,8 @@
 
 ## 1. PoC — terraform 이 자동으로 알았던 구조
 
+> ※ 이 절은 AgentCore 시절 레거시 경로 — 현재 배포(올인원 EC2)에서는 사용되지 않는다.
+
 우리가 `infra/envs/poc/` 로 Aurora/MySQL/MSK/Prometheus/S3 를 **직접 생성**하므로,
 terraform 은 만들면서 그 endpoint 를 module output 으로 갖게 된다. 그걸 그대로 Lambda env 로 흘린다.
 
@@ -63,7 +65,7 @@ EC2 instance role 로 고객 계정을 탐색해 드롭박스로 제공한다.
 | **MSK Cluster Name** | `kafka:ListClustersV2` | `kafka:ListClustersV2` | 이름 문자열만 (host·비번 없음) |
 | **Prometheus URL** | `ec2:DescribeInstances` | `ec2:Describe*` | EC2 선택 → `http://<private-ip>:9090` 자동 구성 |
 | **S3 로그 버킷** | `s3:ListAllMyBuckets` | `s3:ListAllMyBuckets` | 버킷 드롭박스 |
-| **Secret(자격증명)** | `secretsmanager:ListSecrets` | `secretsmanager:ListSecrets` | ARN/이름 드롭박스 |
+| **Secret(자격증명)** | `secretsmanager:ListSecrets` | `secretsmanager:ListSecrets` | ARN/이름 드롭박스 (카드의 "🔑 Secret 목록 불러오기" 버튼으로 로드) |
 | AWS Region / Bedrock Model | (정적 + `bedrock:ListInferenceProfiles`) | — | |
 
 > 권한이 없으면 해당 항목만 **조용히 직접입력으로 fallback** 한다 (앱은 안 깨짐).
@@ -93,7 +95,7 @@ MSK 메트릭 도구(`msk-metrics`)는 실제로는 **CloudWatch `AWS/Kafka` 네
 
 | 도구 | 자동(탐색) | 수동 입력 | 추가 권한 없이 동작? |
 |---|---|---|---|
-| `community-postgres` | host, port | **user/password 또는 Secret**, dbname(기본 postgres) | ❌ 자격증명 필요 |
+| `community-postgres` | host, port | **user/password 또는 Secret**, dbname(기본 postgres), `PG_ACCESS_MODE` | ❌ 자격증명 필요 |
 | `community-mysql` | host, port | **user/password 또는 Secret**, db(기본 mysql) | ❌ 자격증명 필요 |
 | `community-prometheus` | URL(EC2 탐색 시) | URL(탐색 안 되면) | ❌ URL 필요 |
 | `msk-metrics` | cluster name | cluster name(탐색 안 되면), topic/CG(선택) | ⚠️ 이름만 |
@@ -107,6 +109,9 @@ MSK 메트릭 도구(`msk-metrics`)는 실제로는 **CloudWatch `AWS/Kafka` 네
 → **연결정보 불필요 6종**(rds-pi/s3/aws-api/awslabs×3)은 기본 ON 으로 즉시 동작.
 **연결정보 필요 4종**(PG/MySQL/Prometheus/MSK)만 위 입력을 채운 뒤 켜진다.
 (라우터 기본값: `mcp_router/connections.py` 의 `NO_CONFIG_TARGETS`.)
+
+> `community-postgres` 의 `PG_ACCESS_MODE`: `restricted`(기본) | `unrestricted` —
+> `unrestricted` 는 EXPLAIN/인덱스 분석 도구가 열리므로 **읽기전용 계정과 함께** 사용한다.
 
 ---
 

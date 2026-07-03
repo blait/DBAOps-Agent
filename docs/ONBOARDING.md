@@ -28,11 +28,19 @@ EC2 (instance role: DatabaseAdministrator + bedrock:InvokeModel)
    ├─ mcp-router  :9000   MCP 도구 라우터 (DB/AWS/Prometheus 연결)
    ├─ agent       :8080   LangGraph 단일 에이전트 (Bedrock Claude)
    ├─ streamlit   :8501   웹 UI + 연결 설정 페이지
-   └─ slack-bot           Slack Socket Mode (outbound only)
+   ├─ slack-bot           Slack Socket Mode (outbound only)
+   └─ (선택 --profile prometheus)
+      ├─ prometheus        :9090   메트릭 수집/저장
+      ├─ postgres-exporter          RDS PG 내부 지표
+      ├─ mysqld-exporter            RDS MySQL 내부 지표
+      └─ node-exporter              EC2 호스트 메트릭
 ```
 
-- 4개 컨테이너가 하나의 docker network 안에서 통신
-- 외부 노출 포트: Streamlit `8501` 하나 (Slack 은 outbound WebSocket)
+- 기본 4개 컨테이너가 하나의 docker network 안에서 통신.
+  `--profile prometheus` 로 기동하면 4개 추가(prometheus `:9090`, postgres-exporter,
+  mysqld-exporter, node-exporter — EC2 호스트 메트릭) → §4-4 참고
+- 외부 노출 포트: 기본 Streamlit `8501` 하나 (Slack 은 outbound WebSocket).
+  prometheus 프로파일 시 `9090` 도 노출되므로 SG 로 제한 권장
 - 자격증명: EC2 instance role 자동 사용 (별도 키 불필요)
 
 ---
@@ -98,6 +106,8 @@ nano .env
 | `SLACK_BOT_TOKEN` | Slack 봇 토큰 (`xoxb-...`) | Slack 쓸 때만 |
 | `SLACK_APP_TOKEN` | Slack Socket Mode 토큰 (`xapp-...`) | Slack 쓸 때만 |
 | `STREAMLIT_URL` | Slack 답변의 "차트 전체 보기" 링크용 (예: `http://<ec2-ip>:8501`) | 선택 |
+| `PROMETHEUS_PORT` | Prometheus 외부 노출 포트 (기본 `9090`) | prometheus 프로파일 시 |
+| `PG_EXPORTER_DSN` | postgres-exporter 가 붙을 PG DSN (`postgresql://user:pw@host:5432/db?sslmode=require`) | prometheus 프로파일 시 필수 |
 
 **작성 예시 (`.env`)** — 최소 구성은 `AWS_REGION` 한 줄이면 된다. Slack 봇까지 쓰면 토큰 2줄 추가:
 
@@ -128,7 +138,7 @@ docker compose up -d --build
 
 확인:
 ```bash
-docker compose ps          # 4개 Up/running 확인
+docker compose ps          # 4개(프로파일 시 8개) Up/running 확인
 docker compose logs agent  # "serving on 0.0.0.0:8080" 확인
 ```
 
@@ -136,6 +146,50 @@ Slack 없이 먼저:
 ```bash
 docker compose up -d --build mcp-router agent streamlit
 ```
+
+### 4-4. (선택) Prometheus 모니터링 스택
+
+RDS 내부 지표(`pg_*`/`mysql_*`)와 EC2 호스트 지표(`node_*`)를 **PromQL 로 조회**할 수 있게
+동봉된 Prometheus + exporter 3종을 같은 compose 안에서 띄운다.
+**고객이 자체 Prometheus 를 이미 운영 중이면 이 절은 생략**하고, 그 URL 만 연결설정(§5-4)에 입력하면 된다.
+
+절차:
+
+1. `.env` 에 `PG_EXPORTER_DSN` 작성:
+   ```bash
+   PG_EXPORTER_DSN=postgresql://user:pw@host:5432/db?sslmode=require
+   ```
+2. MySQL 은 파일 방식으로 설정:
+   ```bash
+   cp prometheus/my.cnf.example prometheus/my.cnf
+   nano prometheus/my.cnf   # host / user / password 기입
+   ```
+   비밀번호의 특수문자가 `.env` 변수 치환과 충돌할 수 있어 **파일 방식**을 쓴다.
+   `SELECT` / `PROCESS` / `REPLICATION CLIENT` 권한만 가진 **전용 모니터링 유저** 권장.
+3. node-exporter 는 설정 불필요 (EC2 호스트 메트릭 자동 수집).
+4. 기동:
+   ```bash
+   docker compose --profile prometheus up -d
+   ```
+5. Streamlit **🔌 MCP 연결설정**의 Prometheus URL 에 `http://prometheus:9090` 입력
+   — 같은 compose 네트워크라 **서비스명으로 접근**한다.
+6. 인프라 식별자(§5-5)의 `prom_instance_id` 는 `prometheus.yml` 의 `instance` 라벨
+   (예: `dbaops-seoul-allinone`)과 일치시킨다.
+
+scrape job 4종 (`prometheus/prometheus.yml`):
+
+| job | 대상 | 지표 |
+|---|---|---|
+| `prometheus` | 자기 자신 | Prometheus 상태 |
+| `rds-postgres` | postgres-exporter `:9187` | `pg_*` (RDS PG 내부) |
+| `rds-mysql` | mysqld-exporter `:9104` | `mysql_*` (RDS MySQL 내부) |
+| `ec2-host` | node-exporter `:9100` | `node_*` (EC2 호스트 OS) |
+
+기동 확인:
+```bash
+docker compose ps   # 8개 Up 확인
+```
+이후 채팅에서 `Prometheus로 PG 살아있는지 확인해줘` 같은 질문으로 검증.
 
 ---
 
@@ -185,6 +239,8 @@ docker compose up -d --build mcp-router agent streamlit
    - 🔑 **Secrets Manager** — "🔑 Secret 목록 불러오기" 누른 뒤 드롭박스에서 ARN 선택
    - 👤 **User / Password 직접** — 사용자명·비밀번호 입력
 5. **⑤ SSL mode** (PG) — `require`(기본)/`prefer`/`disable`/`verify-ca`/`verify-full`
+6. **⑥ Access mode** (PG) — `restricted`(기본, 조회만) / `unrestricted`(EXPLAIN·인덱스 분석 도구 활성 —
+   **반드시 읽기전용 DB 계정과 함께** 사용). `connections.json` 키는 `PG_ACCESS_MODE`.
 
 > 카드 안의 **🔌 연결 테스트** 버튼 → 해당 도구만 즉시 검증 → `✅ 연결 성공 — 9 tools`.
 
@@ -268,6 +324,9 @@ docker compose logs -f slack-bot   # "Bolt app is running!" 확인
 @DBAOps Aurora CPU 어때?     ← 멘션으로 질문
 (같은 스레드에서) slow query는?  ← 멘션 없이 이어 대화
 ```
+
+> 봇이 매 요청마다 **스레드 대화 이력(최대 4,000자)을 자동 주입**하므로,
+> agent 가 재시작돼도 스레드 맥락이 이어진다.
 
 상세: [`deploy/ec2-allinone/SLACK_SETUP.md`](../deploy/ec2-allinone/SLACK_SETUP.md)
 
@@ -390,14 +449,14 @@ Slack(`@DBAOps ...`)·Streamlit 채팅 어디서든 그대로 쓸 수 있다.
 
 | 도구 | 연결 대상 | 무엇을 보나 | 추천 질문 |
 |---|---|---|---|
-| `community-postgres` | RDS/Aurora **PostgreSQL** (host/port/db/user) | 스키마·테이블·실제 row, `pg_stat_*`, EXPLAIN, 인덱스 분석, 헬스체크 | `orders 테이블 status별 건수 보여줘` · `pg_stat_statements 로 제일 무거운 쿼리 top 5` · `이 쿼리 EXPLAIN 하고 인덱스 추천해줘` |
+| `community-postgres` | RDS/Aurora **PostgreSQL** (host/port/db/user) | 9개 도구: `execute_sql`, `explain_query`, `analyze_query_indexes`, `analyze_workload_indexes`, `analyze_db_health`, `get_top_queries`, `list_schemas`/`objects`, `get_object_details` — EXPLAIN/인덱스 분석은 **unrestricted 모드**(§5-3)일 때 활성 | `orders 테이블 status별 건수 보여줘` · `pg_stat_statements 로 제일 무거운 쿼리 top 5` · `이 쿼리 실행계획 봐줘` · `이 쿼리 EXPLAIN 하고 인덱스 추천해줘` |
 | `community-mysql` | RDS **MySQL** (host/port/db/user) | 테이블·실제 데이터, `SHOW STATUS`, 스키마 | `dbaops_users 에서 region별 사용자 수` · `dbaops_orders 최근 5건` · `현재 연결 수랑 느린 쿼리 설정 알려줘` |
 
 ### 메트릭 — Prometheus (DB 내부 지표를 PromQL 로)
 
 | 도구 | 연결 대상 | 무엇을 보나 | 추천 질문 |
 |---|---|---|---|
-| `community-prometheus` | self-hosted **Prometheus** (`http://host:9090`)<br>※ `postgres-exporter`/`mysqld-exporter` 로 RDS 내부 지표 수집, 또는 **고객 기존 Prometheus** | `pg_up`/`mysql_up`, `pg_stat_activity_count`(active/idle), `pg_database_size_bytes`, `mysql_global_status_*`, `node_*`(호스트 OS) | `Prometheus로 PG랑 MySQL 살아있는지 확인해줘` · `PG 커넥션 상태 active/idle 표로` · `idle in transaction 세션 있어?` · `MySQL 초당 쿼리 추이 그려줘` |
+| `community-prometheus` | self-hosted **Prometheus** (`http://host:9090`)<br>※ 동봉 compose 프로파일로 즉시 구축 가능(§4-4), URL 은 `http://prometheus:9090`. `postgres-exporter`/`mysqld-exporter` 로 RDS 내부 지표, `node-exporter` 로 EC2 호스트 지표 수집. 또는 **고객 기존 Prometheus** | `pg_up`/`mysql_up`, `pg_stat_activity_count`(active/idle), `pg_database_size_bytes`, `mysql_global_status_*`, `node_*`(EC2 호스트 CPU/메모리/디스크) | `Prometheus로 PG랑 MySQL 살아있는지 확인해줘` · `PG 커넥션 상태 active/idle 표로` · `idle in transaction 세션 있어?` · `MySQL 초당 쿼리 추이 그려줘` |
 
 > RDS 는 관리형이라 직접 스크랩 불가 → exporter 가 DB 에 붙어 지표를 뽑고 Prometheus 가 pull.
 > 고객이 이미 Prometheus 를 운영하면 URL 만 그쪽으로 바꿔 기존 자산(alert rule 등)에 그대로 붙는다.
@@ -414,7 +473,8 @@ Slack(`@DBAOps ...`)·Streamlit 채팅 어디서든 그대로 쓸 수 있다.
 
 | 도구 | 연결 대상 | 무엇을 보나 | 추천 질문 |
 |---|---|---|---|
-| `aws-api` | RDS/EC2/MSK **describe** API | 인스턴스 목록·상태·엔드포인트, DB 로그 파일 목록/내용, PI 차원 | `RDS 인스턴스 목록이랑 상태 보여줘` · `이 인스턴스 최근 에러 로그 가져와줘` |
+| `aws-api` | RDS/EC2/MSK **describe** API | 인스턴스 목록·상태·엔드포인트, DB 로그 파일 목록/내용, PI 차원 + RDS 이벤트 이력(`describe_rds_events` — failover/재시작/파라미터 변경, 최대 14일) + AWS 권고사항(`describe_db_recommendations`) + PI 분석 리포트(`pi_create/get_analysis_report` — 소형 인스턴스 클래스 미지원) | `RDS 인스턴스 목록이랑 상태 보여줘` · `이 인스턴스 최근 에러 로그 가져와줘` · `최근 3일 RDS에 failover나 설정 변경 있었어?` · `AWS가 우리 DB에 권고하는 개선사항 확인해줘` |
+| `awslabs-aws-api` | **임의 read-only AWS CLI** 실행 (`call_aws` / `suggest_aws_commands`) | describe 도구에 없는 모든 read-only AWS API | `우리 리전 RDS 스냅샷 목록 뽑아줘` |
 | `s3-log-fetch` | **S3** 로그 버킷 | gzip 로그 byte-range + regex 검색 | `S3 로그에서 최근 ERROR 패턴 찾아줘` |
 | `awslabs-aws-doc` | **AWS 공식 문서** | 문서 검색·요약 (도메인 지식) | `Aurora failover 순서 알려줘` · `pg_stat_statements 설정 방법은?` |
 

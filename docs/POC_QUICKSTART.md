@@ -1,8 +1,10 @@
 # PoC Quickstart — 우리 PoC 환경 처음부터 구축
 
+> ⚠️ **이 문서는 내부 testbed 데모 전용** (AgentCore/Lambda/CloudFront 기반 — 옛 아키텍처). **현재 고객 배포는 [`deploy/ec2-allinone/README.md`](../deploy/ec2-allinone/README.md) + [`docs/ONBOARDING.md`](ONBOARDING.md)** 를 사용한다.
+
 DBAOps-Agent **PoC** (test bed 까지 포함된 데모 환경) 를 빈 AWS 계정에 처음부터 띄우는 step-by-step 가이드. 이 문서대로 따라가면 ~60~90분 후 CloudFront URL 로 UI + 시나리오 generator 까지 동작.
 
-> 고객 환경에 올리는 거라면 [`docs/CUSTOMER_ONBOARDING.md`](CUSTOMER_ONBOARDING.md) 또는 별도 repo `DBAOps-Agent-nonTestbed` 를 사용. 이 문서는 우리가 시연용으로 쓰는 **test bed 포함** 환경.
+> 고객 환경에 올리는 거라면 이 repo 의 `deploy/ec2-allinone/` + [`docs/ONBOARDING.md`](ONBOARDING.md) 를 사용. 이 문서는 우리가 시연용으로 쓰는 **test bed 포함** 환경.
 
 ---
 
@@ -101,7 +103,7 @@ make apply
 이 단계에서 만들어지는 것:
 - VPC + subnet + NAT + S3 endpoint
 - Aurora PG cluster + RDS MySQL + MSK + Prometheus EC2 + S3 logs bucket
-- 13 ECR repo (10 MCP + agent + streamlit + 2 generator)
+- 14 ECR repo (10 MCP + agent + streamlit + 2 generator)
 - IAM role / Cognito / AgentCore IAM
 - ECS cluster + 7 data + 3 log task definition + EventBridge schedule
 - Streamlit ALB + CloudFront distribution
@@ -220,7 +222,7 @@ terraform output streamlit_url
 # → https://dXXXXX.cloudfront.net
 ```
 
-브라우저로 접속. 4 탭 (`🖥️ OS·인프라` `🗄️ DB 성능` `📜 로그` `🧠 단일 에이전트`) + 시나리오 라이브 모니터 탭.
+브라우저로 접속. 🤖 DBAOps Agent 단일 탭 + 🔌 MCP 연결설정 (시나리오 라이브 모니터는 `SHOW_GENERATORS=true` 일 때만).
 
 ---
 
@@ -233,7 +235,7 @@ terraform output streamlit_url
 **옵션 B — CLI**:
 ```bash
 bash scripts/demo_up.sh                    # 모든 generator schedule 활성 (default ENABLED)
-bash scripts/demo_up.sh slow_query         # ad-hoc 1 회 trigger
+bash scripts/demo_up.sh data-slow-query    # ad-hoc 1 회 trigger
 bash scripts/demo_up.sh log-postgres       # ad-hoc 로그 burst 1 회
 ```
 
@@ -390,6 +392,6 @@ aws dynamodb delete-table --table-name dbaops-tfstate-lock --region ap-northeast
 ## 25. 다음 단계
 
 - [docs/SERVICE_GUIDE.md](SERVICE_GUIDE.md) — 시스템 아키텍처, prompt, MCP 자동 노출 흐름
-- 고객 환경 배포는 [`DBAOps-Agent-nonTestbed`](https://github.com/blait/DBAOps-Agent-nonTestbed) repo + `docs/QUICKSTART.md`
+- 고객 환경 배포는 이 repo 의 [`deploy/ec2-allinone/`](../deploy/ec2-allinone/README.md) + [`docs/ONBOARDING.md`](ONBOARDING.md)
 
 질문이나 막힘은 issue 로.

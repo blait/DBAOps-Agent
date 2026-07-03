@@ -28,7 +28,7 @@ oauth_config:
       - app_mentions:read   # 멘션 수신
       - chat:write          # 메시지 전송
       - files:write         # 차트 PNG 첨부
-      - channels:history    # 스레드 내 후속 질문 수신(공개 채널)
+      - channels:history    # 스레드 내 후속 질문 수신 + 스레드 이력 주입(공개 채널)
       - groups:history      # 〃 (비공개 채널)
 settings:
   event_subscriptions:
@@ -37,7 +37,7 @@ settings:
       - message.channels    # 스레드 내 멘션 없는 후속 질문(공개 채널)
       - message.groups      # 〃 (비공개 채널)
   interactivity:
-    is_enabled: true        # 도메인 선택 버튼
+    is_enabled: true        # 향후 인터랙션용 — 현재 버튼 UX 없음
   socket_mode_enabled: true # 공개 엔드포인트 불필요
   org_deploy_enabled: false
 ```
@@ -124,6 +124,8 @@ docker compose logs -f slack-bot
 2. 스레드에 진행상황 표시 ("⏳ 확인 중…" → "💬 Aurora CPU 메트릭 볼게요" → "✅ 완료")
 3. 최종 답변 게시. 차트가 있으면 PNG 첨부.
 
+시간 범위는 기본 **최근 1시간**이며, 질문에 "최근 6시간" 등 기간을 말하면 그것이 우선 적용된다.
+
 ### 4-1. 스레드에서 이어 묻기 (대화 연속성)
 
 **같은 스레드 = 같은 세션.** 멘션 없이 그냥 이어 말하면 에이전트가
@@ -136,7 +138,8 @@ docker compose logs -f slack-bot
 ```
 
 - 세션 키 = Slack 스레드 타임스탬프(`thread_ts`). 새 멘션(새 스레드)은 새 대화.
-- 맥락은 agent 컨테이너 메모리(InMemorySaver)에 보관 — **agent 재시작 시 초기화**된다.
+- 세션 메모리(InMemorySaver)는 재시작 시 휘발되지만, 봇이 **매 요청마다 Slack 스레드 대화
+  이력(최대 4,000자)을 자동 주입**하므로 재시작 후에도 스레드 맥락이 이어진다.
 
 > 2-3 의 `message.*` 이벤트가 켜져 있어야 후속 질문이 동작한다. 안 켜져 있으면
 > 스레드에서 멘션 없이 말해도 봇이 반응하지 않는다(멘션은 계속 정상 동작).
@@ -165,7 +168,7 @@ Slack ──outbound wss(Socket Mode)── [slack-bot 컨테이너]
 | 봇이 오프라인 | `docker compose logs slack-bot` — 토큰 오타/만료, App Token scope `connections:write` |
 | 멘션 무반응 | Event Subscriptions 에 `app_mention` 구독됐나, 채널에 `/invite` 했나 |
 | 스레드 후속질문 무반응 | 2-3 의 `message.channels`(또는 groups/im) 구독 + 재설치했나, 해당 스레드에서 멘션으로 대화를 시작했나 |
-| 후속질문이 새 대화처럼 | agent 가 재시작됐나(InMemorySaver 휘발), 같은 스레드에서 묻고 있나 |
+| 후속질문이 새 대화처럼 | 스레드 이력 주입 실패 — `channels:history` 스코프 확인, 봇 로그에서 `thread history fetch failed` 검색. 같은 스레드에서 묻고 있나 |
 | "실행 오류" | agent 로그(`docker compose logs agent`), `bedrock:InvokeModel` 권한, 라우터 상태 |
 | 토큰 갱신 후 | `docker compose up -d slack-bot` 재기동(`.env` 다시 읽음) |
 

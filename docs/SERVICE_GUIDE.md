@@ -21,17 +21,18 @@ DB / 인프라 분석을 자동화하는 에이전트 서비스. 자연어로 �
 
 여러 번 등장할 "도메인 에이전트 3 개" 라는 말 때문에 헷갈리기 쉬운데:
 
-> **배포되는 컨테이너는 한 개다.** 도메인 에이전트 3 개는 그 한 컨테이너 **안에서 메모리에 만들어지는 Python 객체** 일 뿐, 별도 서비스나 별도 Lambda / ECS task 가 아니다.
+> **도메인 에이전트 3 개는 agent 컨테이너 안에서 메모리에 만들어지는 Python 객체**일 뿐, 별도 서비스나 별도 Lambda / ECS task 가 아니다. 그리고 이 객체들은 **pipeline 모드에서만** 쓰이는데, pipeline 모드는 현재 **UI 에 노출되지 않는다** (API 로 `mode=pipeline` + `domain` 지정 시에만 동작). 주력은 에이전트 1 개짜리 **single 모드**다.
 
-비유하면 — Python 프로세스 하나 안에 `os_agent = ReactAgent(...)` , `db_agent = ReactAgent(...)`, `log_agent = ReactAgent(...)` 변수 3 개 가지고 있는 셈. UI 의 탭 클릭에 따라 적절한 변수 하나를 골라 invoke 한다.
+비유하면 — Python 프로세스 하나 안에 `os_agent = ReactAgent(...)` , `db_agent = ReactAgent(...)`, `log_agent = ReactAgent(...)` 변수 3 개 가지고 있는 셈 (pipeline 모드 한정).
+
+현행 배포 단위 (올인원 EC2 + docker compose):
 
 | 항목 | 실제 배포 단위 수 |
 |---|---|
-| AgentCore Runtime 컨테이너 | **1** (`dbaops_poc-IHXuy85IwY`) |
-| Agent Docker 이미지 | **1** (`dbaops-agent:latest`) |
-| 도메인 에이전트 (Python 객체) | 컨테이너 메모리 안에 **3** 개 |
-| MCP server Lambda | **10** |
-| ECS scenario generator | data 7 + log 3 = **10** task definition |
+| docker compose 컨테이너 | **4** — `mcp-router`(:9000) / `agent`(:8080) / `streamlit`(:8501) / `slack-bot` |
+| 옵션 컨테이너 (`--profile prometheus`) | **4** — prometheus / postgres-exporter / mysqld-exporter / node-exporter |
+| 도메인 에이전트 (Python 객체) | agent 컨테이너 메모리 안에 **3** 개 (pipeline 모드 한정, UI 미노출) |
+| Lambda / AgentCore 리소스 | **0** — `mcp_tools/*/handler.py` 는 mcp-router 가 직접 import (`mcp_router/custom_tools.py`) |
 
 이 한 가지만 머릿속에 두고 읽으면 나머지가 쉬워진다.
 
@@ -39,58 +40,53 @@ DB / 인프라 분석을 자동화하는 에이전트 서비스. 자연어로 �
 
 ## 1. 한눈에 — 컴포넌트 지도
 
+현행 구성 — 올인원 EC2 한 대 위의 docker compose (`deploy/ec2-allinone/docker-compose.yml`):
+
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│ 사용자 (브라우저)                                                       │
-└─────────────────────────────────┬──────────────────────────────────────┘
-                                  │
-                                  ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ Streamlit UI  (ui/streamlit/app.py)                                    │
-│   탭 4개:  🖥️ os_metric / 🗄️ db_metric / 📜 log / 🧠 single            │
-│   + 🧪 시나리오 라이브 모니터 탭                                        │
-│   각 탭이 mode/domain 을 정해서 NDJSON 으로 요청 stream                  │
-└─────────────────────────────────┬──────────────────────────────────────┘
-                                  │ HTTPS POST /invocations (Cognito JWT)
-                                  ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ AWS Bedrock AgentCore Runtime                                          │
-│   리소스 1개:  dbaops_poc-IHXuy85IwY                                    │
-│   컨테이너 1개:  ECR dbaops-agent:latest                                │
-│   메모리 안:                                                           │
-│     · pipeline_graph  (LangGraph StateGraph, 4 노드)                   │
-│         └─ os_metric_agent   ← 도메인 에이전트 객체 1                   │
-│         └─ db_metric_agent   ← 도메인 에이전트 객체 2                   │
-│         └─ log_agent         ← 도메인 에이전트 객체 3                   │
-│     · single_graph    (비교용 1-에이전트)                               │
-└─────────────────────────────────┬──────────────────────────────────────┘
-                                  │ MCP JSON-RPC (Cognito JWT)
-                                  ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ AWS Bedrock AgentCore Gateway                                          │
-│   리소스 1개:  dbaops-poc-tjefplfunu                                    │
-│   tools/list 페이지네이션으로 52개 도구 노출                            │
-└─────────────────────────────────┬──────────────────────────────────────┘
-                                  │
-                ┌─────────────────┼─────────────────┐
-                ▼                 ▼                 ▼
-       ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-       │ 우리 PoC (4) │  │ awslabs (3)  │  │ community (3)│
-       │  rds-pi      │  │  cloudwatch  │  │  prometheus  │
-       │  msk-metrics │  │  aws-doc     │  │  postgres    │
-       │  s3-log-fetch│  │  aws-api     │  │  mysql       │
-       │  aws-api     │  │              │  │              │
-       └──────┬───────┘  └──────┬───────┘  └──────┬───────┘
-              │                 │                 │
-              └─────────────────┼─────────────────┘
-                                ▼
-              ┌─────────────────────────────────┐
-              │ 분석 대상 인프라                  │
-              │   Aurora PostgreSQL · RDS MySQL  │
-              │   MSK Serverless · EC2 (Prometheus)│
-              │   S3 logs bucket                 │
-              └─────────────────────────────────┘
+┌──────────────────────┐        ┌──────────────────────┐
+│ 사용자 (브라우저)      │        │ 사용자 (Slack)        │
+└──────────┬───────────┘        └──────────┬───────────┘
+           │                               │ Socket Mode (outbound WS)
+           ▼                               ▼
+┌──────────────────────┐        ┌──────────────────────┐
+│ streamlit  (:8501)   │        │ slack-bot            │
+│  ui/streamlit/app.py │        │  slack_bot/bot.py    │
+│  탭: 🤖 DBAOps Agent  │        │  thread = session    │
+│     + 🔌 MCP 연결설정 │        │                      │
+└──────────┬───────────┘        └──────────┬───────────┘
+           │ HTTP POST /invocations (AGENT_HTTP_URL — compose 내부, 인증 없음)
+           └───────────────┬───────────────┘
+                           ▼
+┌────────────────────────────────────────────────────────────┐
+│ agent  (:8080)                                             │
+│   메모리 안:                                               │
+│     · single_graph    (주력 1-에이전트 — UI·Slack 공용)     │
+│     · pipeline_graph  (LangGraph 4 노드 — API 전용,        │
+│         os_metric/db_metric/log 도메인 에이전트 객체 3개)   │
+└──────────────────────────┬─────────────────────────────────┘
+                           │ MCP JSON-RPC (인증 없음, compose 내부)
+                           ▼
+┌────────────────────────────────────────────────────────────┐
+│ mcp-router  (:9000)  — 구 AgentCore Gateway 역할            │
+│   tools/list 로 56개 도구 노출 (10 타깃)                    │
+│   · 커스텀 4 타깃: mcp_tools/*/handler.py 직접 import       │
+│     (rds-pi / msk-metrics / s3-log-fetch / aws-api)        │
+│   · stdio 6 타깃: awslabs cloudwatch/aws-doc/aws-api,      │
+│     community prometheus/postgres/mysql (서브프로세스)      │
+└──────────────────────────┬─────────────────────────────────┘
+                           ▼
+         ┌─────────────────────────────────────┐
+         │ 분석 대상 인프라                      │
+         │   Aurora PostgreSQL · RDS MySQL      │
+         │   MSK Serverless · Prometheus        │
+         │   S3 logs bucket                     │
+         └─────────────────────────────────────┘
+
+(+ 옵션: docker compose --profile prometheus 로 prometheus /
+ postgres-exporter / mysqld-exporter / node-exporter 4개 추가 기동)
 ```
+
+Streamlit 은 `SHOW_GENERATORS=true` 일 때만 "🧪 시나리오 라이브 모니터" 탭이 추가된다.
 
 ---
 
@@ -100,8 +96,8 @@ DB / 인프라 분석을 자동화하는 에이전트 서비스. 자연어로 �
 
 | 모드 | 동작 | 언제 쓰나 |
 |---|---|---|
-| **pipeline** (default) | 도메인 에이전트 → 검증 → (필요 시 재분석) → 리포트 4 단계 | UI 의 도메인 탭 3개 (os_metric / db_metric / log) |
-| single | 모든 도구 풀을 한 에이전트가 직접 사용 | "🧠 단일 에이전트" 탭 — 비교용 |
+| **single** | 모든 도구 풀을 한 에이전트가 직접 사용 | **주력 — UI·Slack 공용** |
+| pipeline | 도메인 에이전트 → 검증 → (필요 시 재분석) → 리포트 4 단계 | 코드에 유지, **API 로만 사용 가능** (`mode=pipeline` + `domain` 지정 필요), **UI 미노출** |
 | swarm | (제거됨) — 옛 supervisor/specialist | 옛 클라이언트가 호출하면 명시적 에러 반환 |
 
 ### 2-1. Pipeline 그래프 — 4 단계로 분리한 이유
@@ -180,7 +176,7 @@ thread_id = f"pipeline:{domain}:{session_id}"
 
 ### 3-1. "에이전트 객체 3 개" 의 정확한 의미
 
-다시 강조: **컨테이너는 한 개**, 그 안 메모리에 LangGraph 가 만들어준 ReAct agent 객체가 도메인별로 1 개씩 = 총 3 개. 이게 "도메인 에이전트 3 개" 의 의미.
+다시 강조: **agent 컨테이너는 한 개**, 그 안 메모리에 LangGraph 가 만들어준 ReAct agent 객체가 도메인별로 1 개씩 = 총 3 개. 이게 "도메인 에이전트 3 개" 의 의미다 (pipeline 모드 한정 — UI 미노출, §2 참조).
 
 생성 코드 (`pipeline_graph.py:103`):
 
@@ -209,7 +205,7 @@ def _get_domain_agent(domain_key: str):
 
 → 결과: **컨테이너당 도메인별 빌드 1회만**. 같은 컨테이너의 같은 도메인이 100번 들어와도 build 는 1번.
 
-### 3-2. 도구 풀 — 모든 도메인이 똑같이 52개 도구를 본다
+### 3-2. 도구 풀 — 모든 도메인이 똑같이 56개 도구를 본다
 
 세 도메인 모두 `build_mcp_tools(max_response_chars=12000)` 하나로 끝. 도구 접근 권한으로는 도메인을 안 나눈다.
 
@@ -343,32 +339,32 @@ UI 의 chart_type 분기는 `view_swarm.py:_render_one_chart` (라인 545-) 에 
 `agent/src/dbaops_agent/tools/mcp_auto.py` (160줄) 의 `build_mcp_tools()` 가:
 
 1. `MCPClient.list_tools()` 를 부른다.
-   - 내부적으로 Gateway 의 `tools/list` JSON-RPC 호출
+   - 내부적으로 mcp-router 의 `tools/list` JSON-RPC 호출
    - cursor 페이지네이션으로 다 모음 (`mcp_client.py:list_tools`)
 2. 각 도구 spec 의 `inputSchema` (JSON Schema) → `pydantic.create_model` 로 args model 동적 생성
 3. `StructuredTool.from_function` 으로 LangChain Tool 만듦
-4. invoker 는 thin wrapper — 호출 받으면 None 인자 제거 + `MCPClient.call(...)` + 응답 12k 자 truncate
+4. invoker 는 thin wrapper — 호출 받으면 None 인자 제거 + `MCPClient.call(...)` + 응답 12k 자 truncate (`mcp_auto._truncate` — 시계열 응답은 자르지 않고 **JSON 구조를 보존한 다운샘플링**으로 12,000자 이내로 줄인다. `normalize_message` 는 13,000자 캡.)
 
-도구 이름 변환 — Gateway 가 namespacing 한 `community-mysql___mysql_query` 를 LangChain 호환 식별자 `community_mysql__mysql_query` 로 (`_safe_tool_name`).
+도구 이름 변환 — mcp-router 가 namespacing 한 `community-mysql___mysql_query` 를 LangChain 호환 식별자 `community_mysql__mysql_query` 로 (`_safe_tool_name`).
 
-Gateway 가 자동 끼워넣는 검색 도구 1 개 (`x_amz_bedrock_agentcore_search`) 는 자동 제외 (`_BUILTIN_TOOLS_TO_SKIP`).
+(구 Gateway 가 자동 끼워넣던 검색 도구 `x_amz_bedrock_agentcore_search` 는 여전히 자동 제외 — `_BUILTIN_TOOLS_TO_SKIP`.)
 
 ### 4-3. 언제 도구 카탈로그를 가져오나
 
 컨테이너 cold start 후 **첫 invoke 시 1회만**. `_TOOLS_CACHE` 또는 `_DOMAIN_AGENTS_CACHE` 가 모듈 전역이라 같은 컨테이너 안에선 재호출 안 함. 컨테이너 교체(재배포 등) 시 다시 1회.
 
-도구 description 을 바꿨는데 컨테이너가 안 죽었으면 반영 안 됨 → 이미지 재빌드/Runtime update 가 필요.
+도구 description 을 바꿨는데 컨테이너가 안 죽었으면 반영 안 됨 → `docker compose build agent && docker compose up -d agent` 로 agent 컨테이너 교체 필요 (§9).
 
-### 4-4. 등록된 Gateway target 10 개와 도구 수
+### 4-4. 등록된 target 10 개와 도구 수
 
-`scripts/register_gateway_targets.py:359` 의 `_TOOL_TARGETS` 와 `mcp_tools/<dir>/tool_io.json` 기준:
+`mcp_router/registry.py` (커스텀 4 + stdio 6) 와 `mcp_tools/<dir>/tool_io.json` 기준:
 
 | Target | 출처 | 도구 수 | 주요 도구 |
 |---|---|---|---|
 | `rds-pi` | 우리 PoC | 1 | `rds_performance_insights` (DBInstanceIdentifier auto-resolve) |
 | `msk-metrics` | 우리 PoC | 1 | `msk_metrics` (Cluster Name + Topic + Consumer Group dim auto-wiring) |
 | `s3-log-fetch` | 우리 PoC | 2 | `s3_list_logs`, `s3_log_fetch` |
-| `aws-api` | 우리 PoC | 7 | `describe_rds_instances/_clusters`, `describe_db_log_files`, `download_db_log_file_portion`, `list_msk_clusters`, `describe_ec2_instances`, `describe_pi_dimensions` |
+| `aws-api` | 우리 PoC | 11 | `describe_rds_instances/_clusters`, `describe_db_log_files`, `download_db_log_file_portion`, `describe_rds_events`, `describe_db_recommendations`, `list_msk_clusters`, `describe_ec2_instances`, `pi_create_analysis_report`, `pi_get_analysis_report`, `describe_pi_dimensions` |
 | `awslabs-cloudwatch` | awslabs | 19 | `get_metric_data`, `execute_log_insights_query`, `get_active_alarms`, `analyze_metric` 등 |
 | `awslabs-aws-doc` | awslabs | 4 | `search_documentation`, `read_documentation`, `recommend` |
 | `awslabs-aws-api` | awslabs | 2 | `call_aws`, `suggest_aws_commands` (READ_OPERATIONS_ONLY=true) |
@@ -376,11 +372,11 @@ Gateway 가 자동 끼워넣는 검색 도구 1 개 (`x_amz_bedrock_agentcore_se
 | `community-postgres` | crystaldba | 9 | `execute_sql`, `explain_query`, `analyze_db_health`, `get_top_queries`, `analyze_workload_indexes`, `list_schemas`, `list_objects`, `get_object_details`, `analyze_query_indexes` |
 | `community-mysql` | benborla | 1 | `mysql_query` |
 
-총 **52** 개. 자동 빌드 시 LLM 한테 모두 노출.
+총 **56** 개. 자동 빌드 시 LLM 한테 모두 노출.
 
 ### 4-5. PoC 특화 변환은 어디로 갔는가
 
-수동 wrapper 가 사라졌으니 변환 로직은 **백엔드 Lambda handler** 에 들어있다:
+수동 wrapper 가 사라졌으니 변환 로직은 **백엔드 handler** (`mcp_tools/*/handler.py` — mcp-router 가 직접 import) 에 들어있다:
 
 | 변환 | 위치 |
 |---|---|
@@ -399,7 +395,7 @@ instance role 로 탐색해 드롭박스 제공 + DB 자격증명만 사람이 �
 
 ---
 
-## 5. AgentCore 구성
+## 5. AgentCore 구성 (⚠️ legacy — 현행 배포에서는 미사용, 문서 상단 안내 참조)
 
 ### 5-1. Runtime — 컨테이너 1 개의 정체
 
@@ -450,7 +446,7 @@ CMD ["python", "-m", "dbaops_agent.runtime_entry"]
 
 ---
 
-## 6. 인프라 (Terraform)
+## 6. 인프라 (Terraform) (⚠️ legacy — PoC testbed 프로비저닝용, 현행 배포는 `deploy/ec2-allinone/` 참조)
 
 `infra/modules/` 의 11 개 모듈, `infra/envs/poc/main.tf` 에서 호출:
 
@@ -494,52 +490,51 @@ EventBridge Scheduler 가 각자 cron 으로 자동 실행 + UI 시나리오 카
 
 ## 7. UI — Streamlit
 
-`ui/streamlit/app.py` — `SUPERVISORS` 리스트 (라인 22) 에 4 개 탭 정의:
+`ui/streamlit/app.py` — `SUPERVISORS` 리스트 (라인 23) 에 채팅 탭 **1 개** 정의:
 
 | key | label | mode | domain |
 |---|---|---|---|
-| `os_metric` | 🖥️ OS·인프라 메트릭 분석 | pipeline | os_metric |
-| `db_metric` | 🗄️ DB 성능 메트릭 분석 | pipeline | db_metric |
-| `log` | 📜 로그 분석 | pipeline | log |
-| `single` | 🧠 단일 에이전트 (RCA) | single | (none) |
+| `single` | 🤖 DBAOps Agent | single | (none) |
 
-+ 5번째 탭 "🧪 시나리오 라이브 모니터" (`view_generators`).
++ "🔌 MCP 연결설정" 탭 (`view_connections`) — MCP target 연결정보 편집/테스트.
++ `SHOW_GENERATORS=true` 일 때만 "🧪 시나리오 라이브 모니터" 탭 (`view_generators`).
 
-각 탭은 자기 chat history (`history__<key>`), 자기 session_id (`session_id__<key>`) 를 별도 보관 — **탭끼리 대화가 안 섞임**.
+(옛 도메인 탭 3개 — os_metric / db_metric / log — 는 제거됐다. pipeline 모드는 API 로만 접근 가능.)
+
+각 채팅 탭은 자기 chat history (`history__<key>`), 자기 session_id (`session_id__<key>`) 를 별도 보관.
 
 ### 7-1. 사용자 → 에이전트 호출 페이로드
 
 ```json
 {
-  "mode":       "pipeline",
-  "domain":     "os_metric",
+  "mode":       "single",
   "free_text":  "<사용자 질문>",
   "time_range": {"start": "...", "end": "..."},
-  "session_id": "<uuid8>"
+  "session_id": "<uuid8>",
+  "fast_context": "<이전 턴 요약 — 선택>"
 }
 ```
 
-`agentcore_client.invoke_stream(request)` 가 NDJSON 으로 받아 `view_swarm.render_stream` 가 실시간 카드 렌더.
+`domain` 은 없다 (pipeline 모드를 API 로 직접 부를 때만 필요). `agentcore_client.invoke_stream(request)` 가 NDJSON 으로 받아 `view_swarm.render_stream` 가 실시간 카드 렌더.
 
 ### 7-2. 이벤트 모델
 
-Pipeline 이 yield 하는 이벤트 종류 (`pipeline_graph.py:451`):
+Single 그래프가 yield 하는 이벤트 종류 (`single_graph.py:20`):
 
 ```
-{type:"start",      entry, domain, reasoning}
-{type:"stage",      stage:"domain"|"validation"|"revise"|"report", status}
-{type:"handoff",    agent:"os_metric_agent"|"validation_agent"|"report_agent"|...}
-{type:"message",    message:<도구 호출 / 도구 결과 / AI 메시지>}
-{type:"validation", passed, issues:[{kind, detail}, ...]}
-{type:"report",     markdown, charts:[<spec>, ...]}
-{type:"done",       final_active_agent, handoffs, n_messages}
-{type:"error",      error}
+{type:"start",    entry:"single_agent", reasoning}
+{type:"handoff",  agent:"single_agent"}          # 진입 시 한 번만
+{type:"message",  message:<도구 호출 / 도구 결과 / AI 메시지>}
+{type:"abort",    reason}                        # 예산 초과 등 중단 시
+{type:"done",     final_active_agent, handoffs, n_messages}
+{type:"error",    error}
 ```
+
+pipeline 모드 한정으로는 추가 이벤트가 있다 (`pipeline_graph.py`): `stage`(domain/validation/revise/report 단계 전환), `validation`(passed/issues), `report`(markdown + charts).
 
 UI 가 type 별로:
-- `message` → 도구 호출/결과 카드
-- `validation` → ⚠️ 카드 (passed/이슈 목록)
-- `report` → 📝 카드 + fenced ```json-chart 블록 자동 차트화
+- `message` → 도구 호출/결과 카드. 최종 AI 메시지의 fenced ```json-chart 블록은 자동 차트화
+- (pipeline 한정) `validation` → ⚠️ 카드, `report` → 📝 카드
 
 ### 7-3. 차트 6 종
 
@@ -557,31 +552,46 @@ streamlit 의 `line_chart / bar_chart / area_chart / scatter_chart / dataframe` 
 
 ## 8. 호출 흐름 — 한 요청 따라가기
 
-사용자가 `🖥️ OS·인프라 메트릭` 탭에서 "최근 1시간 EC2 CPU peak" 라고 보냈을 때:
+사용자가 `🤖 DBAOps Agent` 탭에서 "최근 1시간 EC2 CPU peak" 라고 보냈을 때:
 
-1. **UI** (`app.py:_render_supervisor_tab`) → `mode=pipeline, domain=os_metric` 페이로드를 NDJSON streaming 으로 POST.
-2. **Runtime** (`runtime_entry.do_POST`) → mode 분기. `iter_pipeline(request)` 호출.
-3. **Pipeline** (`pipeline_graph.iter_pipeline`) → `start` 이벤트, `_get_graph().stream(stream_mode="values")` 시작.
-4. **domain_agent 노드** → `_DOMAIN_AGENTS_CACHE["os_metric"]` 의 react agent 가 도구 카탈로그를 보고 호출 결정. 예: `community_prometheus___execute_range_query` → Lambda → Prometheus → 결과.
-5. tool_call/tool_result 메시지가 state.domain_messages 에 누적, UI 가 카드로 실시간 표시.
-6. 도메인 응답 텍스트 완성 → `validation` 노드 → JSON pass/fail.
-7. pass 면 바로 `report` 노드. fail 면 `revise` 1회 후 `report`.
-8. `report` 가 markdown + ```json-chart 블록 작성 → UI 가 fenced 블록 파싱해 차트 자동 렌더.
-9. `done` 이벤트 → UI status box 가 "✅ 완료".
+1. **UI** (`app.py`) → `mode=single` 페이로드를 `AGENT_HTTP_URL` (compose 내부 `http://agent:8080/invocations`) 로 NDJSON streaming POST.
+2. **agent** (`runtime_entry.do_POST`) → mode 분기. `iter_single(request)` 호출.
+3. **Single 그래프** (`single_graph.iter_single`) → `start` / `handoff` 이벤트, ReAct loop 시작.
+4. **single agent** 가 도구 카탈로그(56개)를 보고 호출 결정. 예: `community_prometheus___execute_range_query` → **mcp-router** (:9000, MCP JSON-RPC) → stdio 서브프로세스(community-prometheus) 또는 직접 import 한 handler → Prometheus → 결과.
+5. tool_call/tool_result 메시지가 `message` 이벤트로 흘러오고, UI 가 카드로 실시간 표시.
+6. 최종 답변이 markdown + fenced ```json-chart 블록으로 완성 → UI 가 fenced 블록 파싱해 차트 자동 렌더.
+7. `done` 이벤트 → UI status box 가 "✅ 완료".
+
+(pipeline 모드를 API 로 직접 부르면 4번 이후 validation → (revise) → report 노드가 추가로 돈다 — §2-1.)
+
+---
+
+## 8-1. Slack 봇
+
+`slack_bot/bot.py` — **Socket Mode** (slack_bolt). 봇이 Slack 으로 outbound WebSocket 만 걸므로 공개 엔드포인트가 필요 없다 — 프라이빗 EC2 + egress 만으로 동작. agent 는 같은 compose 의 `AGENT_HTTP_URL` 로 호출 (`mode=single`, UI 와 동일 페이로드).
+
+- **스레드 = 세션** — `session_id = "slk-" + thread_ts`. @멘션으로 시작하면 같은 스레드 안에서는 멘션 없이 이어 말해도 같은 세션으로 대화가 계속된다.
+- **스레드 이력 주입** — agent 의 InMemorySaver 는 컨테이너 재시작 시 날아가므로, 매 턴 Slack 스레드 대화(상태 메시지 제외)를 최대 **4,000자** `free_text` 앞에 붙여 보낸다. 재시작에 견고하고, 세션이 살아있으면 중복이지만 무해.
+- **차트** — 답변의 fenced ```json-chart 블록을 `slack_bot/charts.py` 가 tool 결과와 매칭해 **matplotlib PNG** 로 렌더 (Streamlit `view_swarm.py` 차트 로직의 포팅), `files_upload_v2` 로 스레드에 첨부. 이벤트 → Slack 메시지 변환은 `slack_bot/render.py`.
+- **시간 범위** — 매 요청에 최근 N시간 `time_range` 를 넣지만 이는 `default_time_range` 기본값일 뿐, 사용자가 "6시간", "어제" 등을 언급하면 agent 가 그 범위를 우선한다 (`single_graph.py` 프롬프트).
+
+설정 가이드: [`deploy/ec2-allinone/SLACK_SETUP.md`](../deploy/ec2-allinone/SLACK_SETUP.md).
 
 ---
 
 ## 9. 변경 시 무엇을 다시 만드나
 
+모든 변경 반영은 EC2 의 `deploy/ec2-allinone/` 에서 `docker compose build <svc> && docker compose up -d <svc>` 로 끝난다. `register_gateway_targets.py` 는 더 이상 필요 없다.
+
 | 변경한 파일 | 다시 해야 할 것 |
 |---|---|
-| `agent/src/dbaops_agent/*.py` (그래프, 프롬프트 로더, mcp_client) | `scripts/build_agent_image.sh` + `aws bedrock-agentcore-control update-agent-runtime` |
+| `agent/src/dbaops_agent/*.py` (그래프, 프롬프트 로더, mcp_client) | `docker compose build agent && docker compose up -d agent` |
 | `agent/src/dbaops_agent/prompts/*.md` | 위와 동일 (이미지에 .md 가 포함됨) |
-| `mcp_tools/<dir>/handler.py` | 해당 디렉토리 `Dockerfile` 빌드 + ECR push + `aws lambda update-function-code` |
-| `mcp_tools/<dir>/tool_io.json` (description 만 변경) | `python scripts/register_gateway_targets.py` (Lambda 재배포 불필요) |
-| Terraform 모듈 | `terraform apply` (필요 시 `mcp_images_pushed` 토글) |
-| `ui/streamlit/*.py` | Streamlit 재시작만 (`scripts/run_streamlit.sh`) |
-| `generators/data_generator/workloads/*.py` | `scripts/build_generator_images.sh` |
+| `mcp_tools/<dir>/handler.py` / `tool_io.json` | `docker compose build mcp-router && docker compose up -d mcp-router` |
+| `mcp_router/*.py` | 위와 동일 |
+| `ui/streamlit/*.py` | `docker compose build streamlit && docker compose up -d streamlit` |
+| `slack_bot/*.py` | `docker compose build slack-bot && docker compose up -d slack-bot` |
+| 연결정보 (`connections.json`) | 재빌드 불필요 — UI 저장 시 mcp-router 가 mtime 감지해 자동 반영 |
 
 ---
 
@@ -591,28 +601,38 @@ streamlit 의 `line_chart / bar_chart / area_chart / scatter_chart / dataframe` 
 |---|---|
 | 모드 분기 | `agent/src/dbaops_agent/runtime_entry.py:23` |
 | Pipeline 그래프 | `agent/src/dbaops_agent/pipeline_graph.py` (582 줄) |
-| Single 그래프 | `agent/src/dbaops_agent/single_graph.py` |
+| Single 그래프 (주력) | `agent/src/dbaops_agent/single_graph.py` |
 | LLM 클라이언트 | `agent/src/dbaops_agent/llm.py` |
 | MCP 자동 빌드 | `agent/src/dbaops_agent/tools/mcp_auto.py` |
 | MCP HTTP 클라이언트 | `agent/src/dbaops_agent/tools/mcp_client.py` |
 | 도메인 프롬프트 | `agent/src/dbaops_agent/prompts/` |
+| MCP Router HTTP 서버 | `mcp_router/server.py` |
+| MCP Router 도구 카탈로그 | `mcp_router/registry.py` |
+| MCP Router 연결정보 | `mcp_router/connections.py` |
+| 커스텀 도구 직접 import | `mcp_router/custom_tools.py` |
+| stdio MCP 서버 프록시 | `mcp_router/stdio_proxy.py` |
+| Slack 봇 메인 | `slack_bot/bot.py` |
+| Slack 이벤트 렌더 | `slack_bot/render.py` |
+| Slack 차트 PNG | `slack_bot/charts.py` |
 | Streamlit 메인 | `ui/streamlit/app.py` |
 | 채팅 카드 + 차트 | `ui/streamlit/components/view_swarm.py` |
+| MCP 연결설정 탭 | `ui/streamlit/components/view_connections.py` |
 | 시나리오 모니터 | `ui/streamlit/components/view_generators.py` |
-| Lambda MCP handler | `mcp_tools/<target>/handler.py` |
-| Lambda tool schema | `mcp_tools/<target>/tool_io.json` |
-| Gateway 등록 스크립트 | `scripts/register_gateway_targets.py` |
-| Agent 이미지 빌드 | `scripts/build_agent_image.sh` |
-| MCP Lambda 이미지 빌드 | `scripts/build_mcp_images.sh` |
-| Terraform env | `infra/envs/poc/` |
-| Terraform 모듈 | `infra/modules/<name>/` |
+| MCP handler (router 가 직접 import) | `mcp_tools/<target>/handler.py` |
+| MCP tool schema | `mcp_tools/<target>/tool_io.json` |
+| docker compose 정의 | `deploy/ec2-allinone/docker-compose.yml` |
+| Gateway 등록 스크립트 (legacy) | `scripts/register_gateway_targets.py` |
+| Agent 이미지 빌드 (legacy) | `scripts/build_agent_image.sh` |
+| MCP Lambda 이미지 빌드 (legacy) | `scripts/build_mcp_images.sh` |
+| Terraform env (legacy) | `infra/envs/poc/` |
+| Terraform 모듈 (legacy) | `infra/modules/<name>/` |
 
 ---
 
 ## 11. 무엇을 안 하나 (스코프 외)
 
-- write-path / DML / DDL — Aurora PG 는 `crystaldba/postgres-mcp` restricted 모드, RDS MySQL 은 `benborla/mcp-server-mysql` RO 모드, awslabs aws-api-mcp 는 `READ_OPERATIONS_ONLY=true` 강제.
-- 외부 도구 호출 (Slack/PagerDuty/Jira) — 없음.
+- write-path / DML / DDL — Aurora PG 는 `crystaldba/postgres-mcp` 의 `PG_ACCESS_MODE` 설정으로 통제 (기본 `restricted`; 우리 배포는 `unrestricted` + 읽기전용 유저 `dbaops_ro` 조합 — 이 조합이어야 EXPLAIN·인덱스 분석 도구가 동작), RDS MySQL 은 `benborla/mcp-server-mysql` RO 모드, awslabs aws-api-mcp 는 `READ_OPERATIONS_ONLY=true` 강제.
+- 알림 발신 (PagerDuty/Jira 등) — 없음. 단 **Slack 봇 인터페이스는 존재** (Socket Mode, 스레드=세션 — §8-1 참조).
 - 자동 remediation (파라미터 변경 / 인덱스 추가 적용) — Report 의 권고는 모두 비파괴적 다음 행동.
 - Multi-region — `ap-northeast-2` 단일.
 - Multi-account 이식 — bootstrap 스크립트 / envs 분리는 미구현 (필요 시 별도 작업).

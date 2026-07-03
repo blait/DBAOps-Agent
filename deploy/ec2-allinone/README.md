@@ -9,7 +9,8 @@ EC2 (instance role: DatabaseAdministrator + bedrock:InvokeModel)
    ├─ mcp-router  :9000   MCP 도구 라우터 (AgentCore Gateway 대체)
    ├─ agent       :8080   LangGraph 파이프라인/단일 에이전트
    ├─ streamlit   :8501   웹 UI + 🔌 MCP 연결설정
-   └─ slack-bot           Socket Mode (outbound only)
+   ├─ slack-bot           Socket Mode (outbound only)
+   └─ (선택 --profile prometheus) prometheus / postgres-exporter / mysqld-exporter / node-exporter
 ```
 
 ---
@@ -81,6 +82,8 @@ nano .env        # 편집기로 .env 를 연다 (vi 써도 됨)
 | `BEDROCK_MODEL_ID` | 기본값 그대로 두면 됨 | — |
 | `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` | Slack 쓸 때만 (§6 참조) | Slack 시 |
 | `STREAMLIT_URL` | Slack 메시지의 차트 링크용 (예: `http://<ec2-ip>:8501`) | 선택 |
+| `PROMETHEUS_PORT` | Prometheus 외부 노출 포트 (기본 9090) | 프로파일 사용 시 |
+| `PG_EXPORTER_DSN` | postgres-exporter 가 붙을 PG DSN | 프로파일 사용 시 |
 
 > `connections.json`(DB·Prometheus 연결정보)은 **지금 안 만들어도 된다.** 첫 기동 후
 > Streamlit 의 🔌 연결설정 탭에서 입력하면 자동 생성된다(§4). 볼륨에 저장돼 재시작해도 유지.
@@ -91,13 +94,15 @@ nano .env        # 편집기로 .env 를 연다 (vi 써도 됨)
 
 ### 3-0. docker compose 가 뭘 하나 (개념)
 
-`docker-compose.yml` 파일 한 장에 **4개 서비스**(mcp-router / agent / streamlit / slack-bot)가
-정의돼 있다. `docker compose` 명령은 이 파일을 읽어서 4개를 **한 번에** 빌드·실행·중지한다.
+`docker-compose.yml` 파일 한 장에 **기본 4개 서비스**(mcp-router / agent / streamlit / slack-bot)
+**+ 선택 Prometheus 스택 4개**(`profiles: prometheus` — prometheus / postgres-exporter /
+mysqld-exporter / node-exporter)가 정의돼 있다. `docker compose` 명령은 이 파일을 읽어서
+서비스들을 **한 번에** 빌드·실행·중지한다.
 하나하나 `docker run` 할 필요 없이 묶음으로 관리하는 도구라고 보면 된다.
 
 - **이미지(image)**: 코드 + 파이썬 + 라이브러리를 통째로 구운 "실행 가능한 스냅샷". `--build` 가 이걸 만든다.
 - **컨테이너(container)**: 그 이미지를 실제로 띄운 "실행 중인 프로세스". `up` 이 이걸 띄운다.
-- 4개 컨테이너는 자기들끼리 내부 네트워크로 통신한다(`agent` → `mcp-router` 등). 우리가 포트를 신경 쓸 건 Streamlit `8501` 하나뿐.
+- 4개 컨테이너는 자기들끼리 내부 네트워크로 통신한다(`agent` → `mcp-router` 등). 우리가 포트를 신경 쓸 건 Streamlit `8501` 하나뿐 (prometheus 프로파일 사용 시 `9090` 도 추가).
 
 ### 3-1. 빌드 + 실행 (한 줄)
 
@@ -107,8 +112,8 @@ docker compose up -d --build
 ```
 
 이 한 줄이 순서대로 하는 일:
-1. `--build` → 4개 서비스의 **이미지를 빌드**(코드 복사 + 의존성 설치). 처음엔 수 분 걸린다(이후엔 캐시되어 빠름).
-2. `up` → 빌드된 이미지로 **4개 컨테이너를 기동**.
+1. `--build` → 4개 서비스(`--profile prometheus` 시 8개)의 **이미지를 빌드**(코드 복사 + 의존성 설치). 처음엔 수 분 걸린다(이후엔 캐시되어 빠름).
+2. `up` → 빌드된 이미지로 **4개(프로파일 시 8개) 컨테이너를 기동**.
 3. `-d` → **백그라운드(detached)** 로 실행. 터미널을 닫아도 계속 돈다. (`-d` 빼면 로그가 화면에 흐르고, Ctrl+C 누르면 멈춘다.)
 
 > **Slack 없이 먼저 테스트**하려면 slack-bot 만 빼고 3개만 띄운다:
@@ -136,6 +141,23 @@ docker compose logs --tail=50 mcp-router   # 최근 50줄만
 
 이제 브라우저로 `http://<ec2-ip>:8501` 접속이 되면 다음(연결 설정) 단계로.
 
+### 3-3. (선택) Prometheus 모니터링 스택
+
+고객 환경에 Prometheus 가 없을 때, 동봉된 스택(prometheus + postgres-exporter +
+mysqld-exporter + node-exporter)을 같은 compose 로 띄울 수 있다.
+
+1. `.env` 에 `PG_EXPORTER_DSN` 입력 (postgres-exporter 가 붙을 PG 접속 문자열)
+2. MySQL 은 파일 방식 — `cp prometheus/my.cnf.example prometheus/my.cnf` 후 MySQL 접속정보 기입.
+   (비밀번호에 특수문자가 있어도 안전하도록 env 대신 파일을 쓴다. 전용 모니터링 유저 권장)
+3. 기동:
+   ```bash
+   docker compose --profile prometheus up -d
+   ```
+4. Streamlit 🔌 연결설정에서 `PROMETHEUS_URL` 을 `http://prometheus:9090` 으로 입력
+5. scrape 대상: `rds-postgres` / `rds-mysql` / `ec2-host`(node-exporter — EC2 호스트 CPU·메모리)
+
+자세한 내용은 [`../../docs/ONBOARDING.md`](../../docs/ONBOARDING.md) §4-4 참조.
+
 ---
 
 ## 4. 연결 설정 (Streamlit)
@@ -143,11 +165,12 @@ docker compose logs --tail=50 mcp-router   # 최근 50줄만
 1. 브라우저로 `http://<ec2-ip>:8501` 접속
 2. **🔌 MCP 연결설정** 탭
 3. 사용할 도구 토글 ON + 연결 정보 입력:
-   - **Prometheus**: `PROMETHEUS_URL` (예: `http://10.0.0.10:9090`)
-   - **PostgreSQL**: Host/Port/DB + (User·Password) 또는 Secrets Manager ARN
+   - **Prometheus**: `PROMETHEUS_URL` — 동봉 스택(§3-3)이면 `http://prometheus:9090`, 외부 Prometheus 면 `http://10.0.0.10:9090`
+   - **PostgreSQL**: Host/Port/DB + (User·Password) 또는 Secrets Manager ARN.
+     접근 모드 `PG_ACCESS_MODE`: `restricted`(기본) | `unrestricted`(EXPLAIN·인덱스 분석 — 읽기전용 계정 필수)
    - **MySQL**: 동일
    - CloudWatch / RDS PI / S3 / aws-api: 추가 입력 없음(instance role 권한 사용)
-4. **연결 테스트** 로 각 도구 ✅ 확인 → **전체 저장**
+4. **연결 테스트** 로 각 도구 ✅ 확인 (`SELECT 1` / `up` 수준의 실접속 검증) → **전체 저장**
 5. (선택) 인프라 식별자(aurora writer id 등) 입력 — 비우면 에이전트가 describe 로 직접 탐색
 
 저장하면 라우터가 자동 반영(다음 호출부터). 재시작 불필요.
@@ -159,7 +182,7 @@ docker compose logs --tail=50 mcp-router   # 최근 50줄만
 
 ## 5. 사용
 
-- **Streamlit**: OS·인프라 / DB 성능 / 로그 / 단일 RCA 탭에서 자연어 질문 (검증 포함 정식 리포트)
+- **Streamlit**: 🤖 DBAOps Agent 탭에서 자연어 질문 — 단일 에이전트가 모든 도구(DB·메트릭·로그·PI)를 직접 사용
 - **Slack**: 채널에 봇 초대 후 `@DBAOps 최근 1시간 Aurora CPU 어때?` → 스레드에 바로 답.
   같은 스레드 안에서는 멘션 없이 이어 물어도 맥락을 기억하며 대화가 계속된다.
 
@@ -197,7 +220,7 @@ docker compose down
 docker compose down -v
 
 # 실시간 로그 보기 (문제 진단 1순위)
-docker compose logs -f            # 4개 전체
+docker compose logs -f            # 기본 4개(프로파일 시 8개) 전체
 docker compose logs -f agent      # 특정 서비스만
 ```
 

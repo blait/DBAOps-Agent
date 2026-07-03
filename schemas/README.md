@@ -2,6 +2,7 @@
 
 JSON Schema 정의. Agent ↔ UI ↔ MCP 간 계약.
 
-- `analysis_request.json` — Streamlit → Runtime 입력
-- `analysis_report.json`  — Runtime → Streamlit 출력
-- `mcp_tool_io/` — 각 MCP 도구의 I/O 스키마 (각 `mcp_tools/*/tool_io.json` 가 source of truth)
+- `analysis_request.json` — Streamlit → agent 컨테이너(:8080/invocations) 입력
+- `analysis_report.json`  — agent 컨테이너(:8080/invocations) → Streamlit 출력
+
+각 MCP 도구의 I/O 스키마는 `mcp_tools/*/tool_io.json` 참조.

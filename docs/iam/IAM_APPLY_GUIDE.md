@@ -2,7 +2,7 @@
 
 DBAOps-Agent **PoC** (testbed: Aurora/MySQL/MSK/EC2/시나리오 generator 까지 자기 계정에 띄우는 케이스) 배포 담당자에게 권한을 부여하는 절차.
 
-> 고객 인프라에 agent 만 올리는 케이스라면 [`DBAOps-Agent-nonTestbed`](https://github.com/blait/DBAOps-Agent-nonTestbed) repo 의 `docs/iam/IAM_APPLY_GUIDE.md` 를 사용. 이 PoC 권한은 **RDS/MSK/EC2 instance/Scheduler 등을 추가로 생성/관리** 해야 해서 권한 폭이 더 넓음.
+> 고객 인프라에 agent 만 올리는 케이스(올인원 EC2)는 이 권한이 불필요 — `DatabaseAdministrator` 관리형 + `bedrock:InvokeModel` 인라인이면 됨. [`deploy/ec2-allinone/README.md`](../../deploy/ec2-allinone/README.md) 참조. 이 PoC 권한은 **RDS/MSK/EC2 instance/Scheduler 등을 추가로 생성/관리** 해야 해서 권한 폭이 더 넓음.
 
 ---
 
@@ -18,7 +18,7 @@ DBAOps-Agent **PoC** (testbed: Aurora/MySQL/MSK/EC2/시나리오 generator 까�
 
 3 개 모두 **customer managed policy 로 만들어 사용자에게 attach**.
 
-PoC 만의 추가 권한 (nonTestbed 와 비교):
+PoC 만의 추가 권한 (올인원 EC2 배포와 비교):
 
 | 추가 권한 | 사유 |
 |---|---|

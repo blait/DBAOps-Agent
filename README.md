@@ -2,7 +2,7 @@
 
 LangGraph + AWS Bedrock + MCP 기반 DB·인프라 분석 에이전트. 자연어로 "최근 1시간 Aurora CPU 어때?" 라고 물으면 → AI 분석가가 도구를 직접 골라 호출 → 차트 포함 답변을 돌려준다.
 
-**배포 방식**: EC2 한 대 + docker compose (4 서비스). AgentCore/Gateway/Lambda 없이 동작.
+**배포 방식**: EC2 한 대 + docker compose (기본 4 서비스 + 선택 Prometheus 스택 4). AgentCore/Gateway/Lambda 없이 동작.
 인터페이스는 **Streamlit 웹 UI** + **Slack 봇** 두 가지.
 
 > **고객 환경에 처음 배포** → [`deploy/ec2-allinone/README.md`](deploy/ec2-allinone/README.md)
@@ -23,7 +23,8 @@ EC2 (instance role: DatabaseAdministrator + bedrock:InvokeModel)
    ├─ mcp-router  :9000   MCP 도구 라우터
    ├─ agent       :8080   LangGraph 단일 에이전트
    ├─ streamlit   :8501   웹 UI + 🔌 MCP 연결설정
-   └─ slack-bot           Socket Mode (outbound only)
+   ├─ slack-bot           Socket Mode (outbound only)
+   └─ (선택 --profile prometheus) prometheus / postgres-exporter / mysqld-exporter / node-exporter
 ```
 
 ---
@@ -54,6 +55,7 @@ cp .env.example .env
 nano .env                           # AWS_REGION, Slack 토큰(선택)
 
 docker compose up -d --build        # 4개 서비스 기동
+docker compose --profile prometheus up -d --build  # Prometheus 스택 포함
 # → http://<ec2-ip>:8501 접속
 # → 🔌 MCP 연결설정 탭에서 DB/Prometheus 정보 입력
 ```
@@ -87,14 +89,14 @@ docker compose down -v                   # 종료 + 연결설정 초기화
 
 | 도구 | 설명 | 추가 설정 |
 |---|---|---|
-| `community-postgres` | PostgreSQL / Aurora PG 쿼리 | Host + 자격증명 |
+| `community-postgres` | PostgreSQL / Aurora PG 쿼리 + EXPLAIN·인덱스 분석 (9개 도구) | Host + 자격증명 |
 | `community-mysql` | MySQL / RDS MySQL 쿼리 | Host + 자격증명 |
-| `community-prometheus` | PromQL 메트릭 | URL |
+| `community-prometheus` | PromQL 메트릭 — 동봉 프로파일로 즉시 구축 가능 (`http://prometheus:9090`) | URL |
 | `msk-metrics` | MSK/Kafka CloudWatch 메트릭 | Cluster Name |
 | `rds-pi` | RDS Performance Insights | — (instance role) |
 | `awslabs-cloudwatch` | CloudWatch 메트릭/로그 | — |
 | `s3-log-fetch` | S3 로그 byte-range 조회 | — |
-| `aws-api` | RDS/EC2/MSK describe | — |
+| `aws-api` | RDS/EC2/MSK describe + RDS 이벤트/권고사항 + PI 분석 리포트 | — |
 | `awslabs-aws-api` | 임의 read-only AWS CLI | — |
 | `awslabs-aws-doc` | AWS 문서 검색 | — |
 
