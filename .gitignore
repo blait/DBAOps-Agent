@@ -67,3 +67,6 @@ ui/streamlit/streamlit.log
 # Prometheus exporter 비밀번호 파일 (예시만 커밋)
 deploy/ec2-allinone/prometheus/my.cnf
 deploy/ec2-allinone/connections.json
+
+# 테스트 접속 정보 (실제 자격증명 — 절대 커밋 금지)
+TEST_ACCESS.md
